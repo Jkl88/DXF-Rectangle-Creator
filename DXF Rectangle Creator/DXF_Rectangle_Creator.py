@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QLabel, QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QFileDialog,
     QMessageBox, QScrollArea, QGraphicsView, QGraphicsScene
 )
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, QSettings
 from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
@@ -117,6 +117,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DXF Конструктор: Прямоугольник и Отверстия")
+
+        self.settings = QSettings("DXF", "DXFConstructor")
 
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
@@ -325,12 +327,17 @@ class MainWindow(QMainWindow):
         else:
             default_filename = f"{name}.dxf"
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить DXF", default_filename, filter="DXF файлы (*.dxf)")
+        # Получаем последний используемый путь из настроек (если нет - домашняя папка)
+        last_path = self.settings.value("lastSavePath", os.path.expanduser("~"))
+        initial_path = os.path.join(last_path, default_filename)
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить DXF", initial_path, filter="DXF файлы (*.dxf)")
         if file_path:
             if not file_path.lower().endswith(".dxf"):
                 file_path += ".dxf"
             try:
                 doc.saveas(file_path)
+                self.settings.setValue("lastSavePath", os.path.dirname(file_path))
                 msg_box = QMessageBox(self)
                 msg_box.setWindowTitle("Успех")
                 msg_box.setText(f"Файл успешно сохранён:\n{file_path}")
