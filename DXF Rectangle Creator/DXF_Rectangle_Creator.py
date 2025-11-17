@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QUrl, QSettings
 from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage
 from ezdxf.math import Matrix44
 
-CURRENT_VERSION = "1.0.1"
+CURRENT_VERSION = "1.0.2"
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
 class ArrayEntry(QWidget):
