@@ -1,14 +1,20 @@
+import requests
 import sys
+import shutil
+import tempfile
 import math
 import os
 import ezdxf
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QFileDialog,
-    QMessageBox, QScrollArea, QGraphicsView, QGraphicsScene
+    QMessageBox, QScrollArea, QGraphicsView, QGraphicsScene, QCheckBox
 )
 from PyQt6.QtCore import Qt, QUrl, QSettings
-from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath
+from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage
+from ezdxf.math import Matrix44
+
+CURRENT_VERSION = "1.0.1"
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
 class ArrayEntry(QWidget):
@@ -116,7 +122,7 @@ class ArrayEntry(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DXF Конструктор: Прямоугольник и Отверстия")
+        self.setWindowTitle(f"DXF Конструктор: Прямоугольник и Отверстия - v.{CURRENT_VERSION}")
 
         self.settings = QSettings("DXF", "DXFConstructor")
 
@@ -200,6 +206,11 @@ class MainWindow(QMainWindow):
         self.generateButton = QPushButton("Сгенерировать DXF")
         self.generateButton.clicked.connect(self.generate_dxf)
         buttonsLayout.addWidget(self.generateButton)
+        self.exportPng = QCheckBox("Вывести PNG")
+        buttonsLayout.addWidget(self.exportPng)
+        self.btnCheckUpdate = QPushButton("Проверка обновления")
+        self.btnCheckUpdate.clicked.connect(self.check_update)
+        buttonsLayout.addWidget(self.btnCheckUpdate)
         controlsLayout.addLayout(buttonsLayout)
 
         mainLayout.addWidget(controlsWidget)
@@ -210,7 +221,7 @@ class MainWindow(QMainWindow):
         self.previewView.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.previewView.setMinimumHeight(400)
         # Инвертируем ось Y, чтобы (0,0) было в нижнем левом углу
-        self.previewView.setTransform(QTransform().scale(1, -1))
+        #self.previewView.setTransform(QTransform().scale(1, -1))
         mainLayout.addWidget(self.previewView)
 
         # Список цветов для массивов (назначаются циклически)
@@ -231,124 +242,415 @@ class MainWindow(QMainWindow):
         array_entry.removeButton.clicked.connect(self.update_preview)
         self.update_preview()
 
+    def save_preview_image(self, file_path_without_ext):
+        # получаем сцену
+        scene = self.previewScene
+
+        # границы сцены
+        rect = scene.sceneRect()
+
+        # создаём QImage подходящего размера
+        img = QImage(int(rect.width()), int(rect.height()), QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+
+        painter = QPainter(img)
+
+        # Рисуем сцену в изображение
+        scene.render(painter)
+        painter.end()
+
+        # сохраняем PNG
+        out_path = file_path_without_ext + ".png"
+        img.save(out_path)
+
+        return out_path
     def update_preview(self):
         self.previewScene.clear()
-        margin = 10
-        max_extent_x = 0
-        max_extent_y = 0
 
-        # Получаем размеры прямоугольника
+        # -------------------------------
+        #  ПАРАМЕТРЫ
+        # -------------------------------
         width = self.spinWidth.value()
         height = self.spinHeight.value()
         corner_radius = self.spinCornerRadius.value()
+
+        margin = 10     # большой отступ под размеры
+        max_x = width
+        max_y = height
+
+        # -------------------------------
+        #  ПРЯМОУГОЛЬНИК
+        # -------------------------------
         pen_rect = QPen(Qt.GlobalColor.black)
         pen_rect.setCosmetic(True)
+
         if corner_radius > 0:
-            # Рисуем скруглённый прямоугольник через QPainterPath
             path = QPainterPath()
             path.addRoundedRect(0, 0, width, height, corner_radius, corner_radius)
             self.previewScene.addPath(path, pen_rect)
         else:
             self.previewScene.addRect(0, 0, width, height, pen_rect)
-        max_extent_x = max(max_extent_x, width)
-        max_extent_y = max(max_extent_y, height)
 
-        # Обрабатываем каждый массив отверстий
+        # -------------------------------
+        #  ОТВЕРСТИЯ И ПОДПИСИ
+        # -------------------------------
         for idx in range(self.arraysLayout.count()):
             widget = self.arraysLayout.itemAt(idx).widget()
-            if widget is not None:
-                (offset_left, offset_bottom, hole_diameter,
-                 count_vert, gap_vert, count_horz, gap_horz) = widget.get_values()
-                max_extent_x = max(max_extent_x, offset_left + (count_horz - 1) * gap_horz + hole_diameter)
-                max_extent_y = max(max_extent_y, offset_bottom + (count_vert - 1) * gap_vert + hole_diameter)
-                color_name = self.color_list[idx % len(self.color_list)]
-                pen_array = QPen(QColor(color_name))
-                pen_array.setCosmetic(True)
-                widget.label.setStyleSheet(f"color: {color_name};")
-                for i in range(count_vert):
-                    for j in range(count_horz):
-                        cx = offset_left + j * gap_horz
-                        cy = offset_bottom + i * gap_vert
-                        hole_radius = hole_diameter / 2.0
-                        self.previewScene.addEllipse(cx - hole_radius, cy - hole_radius,
-                                                     hole_diameter, hole_diameter, pen_array)
+            if widget is None:
+                continue
 
-        self.previewScene.setSceneRect(0 - margin, 0 - margin,
-                                       max_extent_x + 2 * margin, max_extent_y + 2 * margin)
-        self.previewView.fitInView(self.previewScene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-        self.lineName.setText(f"R_{self.spinWidth.value():.2f}x{self.spinHeight.value():.2f}")
+            (ox, oy, d, cv, gv, ch, gh) = widget.get_values()
+            rr = d/2
+            color = QColor(self.color_list[idx % len(self.color_list)])
+            pen_arr = QPen(color)
+            pen_arr.setCosmetic(True)
+            widget.label.setStyleSheet(f"color: {self.color_list[idx % len(self.color_list)]};")
+
+            # Рисуем отверстия
+            for i in range(cv):
+                for j in range(ch):
+                    cx = ox + j * gh
+                    cy = oy + i * gv
+
+                    self.previewScene.addEllipse(cx-rr, cy-rr, d, d, pen_arr)
+
+                    max_x = max(max_x, cx + rr)
+                    max_y = max(max_y, cy + rr)
+
+            # ======= ПОДПИСИ (точная привязка) ========
+
+            lx = ox
+            ly = oy
+
+            # 1) Отступ X — строго слева от отверстия
+
+            self.previewScene.addLine(ox + rr + 2, oy, 0, oy, color)
+            txt_x = self.previewScene.addText(f"{ox:.1f} мм")
+            txt_x.setDefaultTextColor(color)
+            rect = txt_x.boundingRect()
+            txt_x.setPos(ox/2 - rect.width()/2, oy - 20)
+
+            # 2) Отступ Y — строго над отверстием
+            self.previewScene.addLine(ox, oy + rr + 2, ox, 0, color)
+            txt_y = self.previewScene.addText(f"{oy:.1f} мм")
+            txt_y.setDefaultTextColor(color)
+            txt_y.setRotation(-90)
+            rect = txt_y.boundingRect()
+            txt_y.setPos(ox, oy/2 + rect.width()/2)
+
+            # 3) Диаметр
+            txt_d = self.previewScene.addText(f"Ø {d:.1f}")
+            txt_d.setDefaultTextColor(color)
+            txt_d.setPos(lx + rr - 5, ly + rr - 5)
+
+            # 4) Шаг X — между отверстиями
+            if ch > 1:
+                mid_x = ox + gh * (ch - 1) / 2
+                self.previewScene.addLine(ox + gh + rr + 2, oy, ox, oy, color)
+                txt_sx = self.previewScene.addText(f"{gh:.1f} мм")
+                txt_sx.setDefaultTextColor(color)
+                rect = txt_sx.boundingRect()
+                txt_sx.setPos((ox + gh)/2 - rect.width()/2, oy - 20)
+
+            # 5) Шаг Y — между отверстиями
+            if cv > 1:
+                mid_y = oy + gv * (cv - 1) / 2
+                self.previewScene.addLine(ox, oy + gv + rr + 2, ox, oy, color)
+                txt_sy = self.previewScene.addText(f"{gv:.1f} мм")
+                txt_sy.setDefaultTextColor(color)
+                txt_sy.setRotation(-90)
+                rect = txt_sy.boundingRect()
+                txt_sy.setPos(ox, gv/2 + oy + rect.width()/2)
+
+        # -------------------------------
+        #  ГАБАРИТНЫЕ РАЗМЕРЫ
+        # -------------------------------
+        dim_pen = QPen(Qt.GlobalColor.black)
+        dim_pen.setCosmetic(True)
+
+        # --- ширина ---
+        self.previewScene.addLine(0, height + 15, width, height + 15, dim_pen)
+        self.previewScene.addLine(0, height + 10, 0, height + 20, dim_pen)
+        self.previewScene.addLine(width, height + 10, width, height + 20, dim_pen)
+
+        txt_w = self.previewScene.addText(f"{width:.2f} мм")
+        txt_w.setPos(width/2 - 25, height + 15)
+
+        # --- высота ---
+        self.previewScene.addLine(-15, 0, -15, height, dim_pen)
+        self.previewScene.addLine(-10, 0, -20, 0, dim_pen)
+        self.previewScene.addLine(-10, height, -20, height, dim_pen)
+
+        txt_h = self.previewScene.addText(f"{height:.2f} мм")
+        txt_h.setRotation(-90)
+        rect = txt_h.boundingRect()
+        txt_h.setPos(-35-(rect.height()/2 - 10), height/2 + rect.width()/2)
+
+        # --- радиус ---
+        if corner_radius > 0:
+            txt_r = self.previewScene.addText(f"R={corner_radius:.1f}")
+            txt_r.setPos(width - corner_radius - 40, height - corner_radius + 20)
+
+        # -------------------------------
+        #  ГРАНИЦА СЦЕНЫ + fitInView
+        # -------------------------------
+        self.previewScene.setSceneRect(
+            -margin - 50,
+            -margin - 50,
+            max_x + 2 * margin + 50,
+            max_y + 2 * margin + 80,
+        )
+
+        self.previewView.fitInView(
+            self.previewScene.sceneRect(),
+            Qt.AspectRatioMode.KeepAspectRatio
+        )
+
+        # автоимя
+        self.lineName.setText(f"R_{width:.2f}x{height:.2f}")
 
     def generate_dxf(self):
+        import ezdxf
+        from ezdxf.math import Matrix44
+
         width = self.spinWidth.value()
         height = self.spinHeight.value()
         corner_radius = self.spinCornerRadius.value()
+
+        # Создаем новый DXF
         doc = ezdxf.new(dxfversion="R2010")
+        doc.header["$INSUNITS"] = 4  # миллиметры
         msp = doc.modelspace()
 
+        # ------------------------------
+        #   ПРЯМОУГОЛЬНИК / СКРУГЛЕНИЯ
+        # ------------------------------
         if corner_radius > 0:
-            # Создаем линии и дуги для скруглённого прямоугольника:
-            # Нижняя линия:
-            msp.add_line((corner_radius, 0), (width - corner_radius, 0))
-            # Нижняя правая дуга: центр (width - r, r), от 270 до 360
-            msp.add_arc(center=(width - corner_radius, corner_radius), radius=corner_radius, start_angle=270, end_angle=360)
-            # Правая линия:
-            msp.add_line((width, corner_radius), (width, height - corner_radius))
-            # Верхняя правая дуга: центр (width - r, height - r), от 0 до 90
-            msp.add_arc(center=(width - corner_radius, height - corner_radius), radius=corner_radius, start_angle=0, end_angle=90)
-            # Верхняя линия:
-            msp.add_line((width - corner_radius, height), (corner_radius, height))
-            # Верхняя левая дуга: центр (r, height - r), от 90 до 180
-            msp.add_arc(center=(corner_radius, height - corner_radius), radius=corner_radius, start_angle=90, end_angle=180)
-            # Левая линия:
-            msp.add_line((0, height - corner_radius), (0, corner_radius))
-            # Нижняя левая дуга: центр (r, r), от 180 до 270
-            msp.add_arc(center=(corner_radius, corner_radius), radius=corner_radius, start_angle=180, end_angle=270)
+            r = corner_radius
+
+            # Нижняя линия
+            msp.add_line((r, 0), (width - r, 0))
+
+            # Нижняя правая дуга (270–360°)
+            msp.add_arc(
+                center=(width - r, r),
+                radius=r,
+                start_angle=270,
+                end_angle=360
+            )
+
+            # Правая вертикаль
+            msp.add_line((width, r), (width, height - r))
+
+            # Верхняя правая дуга (0–90°)
+            msp.add_arc(
+                center=(width - r, height - r),
+                radius=r,
+                start_angle=0,
+                end_angle=90
+            )
+
+            # Верхняя линия
+            msp.add_line((width - r, height), (r, height))
+
+            # Верхняя левая дуга (90–180°)
+            msp.add_arc(
+                center=(r, height - r),
+                radius=r,
+                start_angle=90,
+                end_angle=180
+            )
+
+            # Левая вертикаль
+            msp.add_line((0, height - r), (0, r))
+
+            # Нижняя левая дуга (180–270°)
+            msp.add_arc(
+                center=(r, r),
+                radius=r,
+                start_angle=180,
+                end_angle=270
+            )
+
         else:
             # Обычный прямоугольник
-            points = [(0, 0), (width, 0), (width, height), (0, height), (0, 0)]
-            msp.add_lwpolyline(points, close=True)
+            pts = [(0, 0), (width, 0), (width, height), (0, height), (0, 0)]
+            msp.add_lwpolyline(pts, close=True)
 
-        # Добавляем отверстия для каждого массива
+        # ------------------------------
+        #       ОТВЕРСТИЯ
+        # ------------------------------
         for idx in range(self.arraysLayout.count()):
             widget = self.arraysLayout.itemAt(idx).widget()
-            if widget is not None:
-                (offset_left, offset_bottom, hole_diameter,
-                 count_vert, gap_vert, count_horz, gap_horz) = widget.get_values()
-                for i in range(count_vert):
-                    for j in range(count_horz):
-                        cx = offset_left + j * gap_horz
-                        cy = offset_bottom + i * gap_vert
-                        msp.add_circle(center=(cx, cy), radius=hole_diameter / 2.0)
+            if widget is None:
+                continue
 
+            (offset_left, offset_bottom, hole_diameter,
+             count_vert, gap_vert, count_horz, gap_horz) = widget.get_values()
+
+            r = hole_diameter / 2
+
+            for i in range(count_vert):
+                for j in range(count_horz):
+                    cx = offset_left + j * gap_horz
+                    cy = offset_bottom + i * gap_vert
+                    msp.add_circle((cx, cy), r)
+
+        # ------------------------------
+        #     ЗЕРКАЛО ПО ГОРИЗОНТАЛИ
+        # ------------------------------
+        mirror = Matrix44([
+             1, 0, 0, 0,         # X без изменений
+             0,-1, 0, height,    # Y → -Y + height
+             0, 0, 1, 0,
+             0, 0, 0, 1
+        ])
+
+        for entity in list(msp):
+            try:
+                entity.transform(mirror)
+            except ezdxf.lldxf.const.DXFError:
+                pass
+
+        # ------------------------------
+        #    СОХРАНЕНИЕ ФАЙЛА
+        # ------------------------------
         designation = self.lineDesignation.text().strip()
-        name = self.lineName.text().strip() if self.lineName.text().strip() else f"R_{self.spinWidth.value():.2f}x{self.spinHeight.value():.2f}"
+        name = self.lineName.text().strip() or f"R_{width:.2f}x{height:.2f}"
+
         if designation:
             default_filename = f"{designation}_{name}.dxf"
         else:
             default_filename = f"{name}.dxf"
 
-        # Получаем последний используемый путь из настроек (если нет - домашняя папка)
         last_path = self.settings.value("lastSavePath", os.path.expanduser("~"))
         initial_path = os.path.join(last_path, default_filename)
 
-        file_path, _ = QFileDialog.getSaveFileName(self, "Сохранить DXF", initial_path, filter="DXF файлы (*.dxf)")
-        if file_path:
-            if not file_path.lower().endswith(".dxf"):
-                file_path += ".dxf"
-            try:
-                doc.saveas(file_path)
-                self.settings.setValue("lastSavePath", os.path.dirname(file_path))
-                msg_box = QMessageBox(self)
-                msg_box.setWindowTitle("Успех")
-                msg_box.setText(f"Файл успешно сохранён:\n{file_path}")
-                open_folder_button = msg_box.addButton("Открыть папку", QMessageBox.ButtonRole.ActionRole)
-                msg_box.addButton("Закрыть", QMessageBox.ButtonRole.RejectRole)
-                msg_box.exec()
-                if msg_box.clickedButton() == open_folder_button:
-                    folder = os.path.dirname(file_path)
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", f"Ошибка при сохранении файла:\n{str(e)}")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить DXF", initial_path, "DXF файлы (*.dxf)"
+        )
+
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".dxf"):
+            file_path += ".dxf"
+
+        try:
+            # === СОХРАНЕНИЕ DXF ===
+            doc.saveas(file_path)
+            self.settings.setValue("lastSavePath", os.path.dirname(file_path))
+        
+            # База имени файла без расширения
+            file_base, _ = os.path.splitext(file_path)
+        
+            # === СОХРАНЕНИЕ PNG ===
+            if self.exportPng.isChecked():
+                try:
+                    png_path = self.save_preview_image(file_base)      # создаёт PNG
+                except Exception as e:
+                    QMessageBox.warning(self, "PNG ошибка", f"Не удалось сохранить PNG:\n{str(e)}")
+        
+            # === ОКНО УСПЕХА ===
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Успех")
+            msg_box.setText(f"Файл успешно сохранён:\n{file_path}")
+            open_btn = msg_box.addButton("Открыть папку", QMessageBox.ButtonRole.ActionRole)
+            msg_box.addButton("Закрыть", QMessageBox.ButtonRole.RejectRole)
+            msg_box.exec()
+        
+            if msg_box.clickedButton() == open_btn:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(file_path)))
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при сохранении файла:\n{str(e)}")
+
+    
+
+    def check_update(self):
+        """ Проверяет новую версию на GitHub и предлагает обновление """
+        try:
+            url = "https://api.github.com/repos/Jkl88/DXF-Rectangle-Creator/releases/latest"
+            response = requests.get(url, timeout=5)
+            data = response.json()
+    
+            latest = data["tag_name"].lstrip("v")
+            release_url = data["html_url"]
+    
+            # ищем первый .exe в релизе
+            assets = data.get("assets", [])
+            exe_url = None
+            for a in assets:
+                if a["name"].lower().endswith(".exe"):
+                    exe_url = a["browser_download_url"]
+                    break
+    
+            if exe_url is None:
+                QMessageBox.warning(self, "Ошибка", "В релизе нет exe-файла.")
+                return
+    
+            if latest == CURRENT_VERSION:
+                QMessageBox.information(self, "Обновление", "У вас последняя версия.")
+                return
+    
+            # --- найдено обновление ---
+            reply = QMessageBox.question(
+                self,
+                "Доступно обновление",
+                f"Доступна новая версия: {latest}\n"
+                f"Текущая версия: {CURRENT_VERSION}\n\n"
+                f"Обновить сейчас?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+    
+            if reply == QMessageBox.StandardButton.Yes:
+                self.perform_update(exe_url)
+    
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось проверить обновление:\n{e}")
+    
+    
+    def perform_update(self, download_url):
+        """ Скачивает exe, заменяет текущий и запускает новый """
+        try:
+            # путь к текущему exe
+            current_path = sys.executable
+    
+            # путь к временному файлу для загрузки
+            tmp_dir = tempfile.gettempdir()
+            new_exe = os.path.join(tmp_dir, "update_new.exe")
+    
+            # скачиваем новый файл
+            r = requests.get(download_url, stream=True)
+            total = int(r.headers.get("content-length", 0))
+    
+            with open(new_exe, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+    
+            # создаём батник, который заменит EXE после выхода программы
+            updater_path = os.path.join(tmp_dir, "update.bat")
+    
+            with open(updater_path, "w", encoding="utf-8") as bat:
+                bat.write(f"""
+    @echo off
+    timeout /t 2 >nul
+    copy /y "{new_exe}" "{current_path}"
+    start "" "{current_path}"
+    del "{new_exe}"
+    del "%~f0"
+                """)
+    
+            # запускаем апдейтер
+            os.startfile(updater_path)
+    
+            # закрываем программу
+            QApplication.instance().quit()
+    
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось обновить:\n{e}")
+
 
 def main():
     app = QApplication(sys.argv)
