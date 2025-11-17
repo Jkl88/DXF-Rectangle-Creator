@@ -611,41 +611,35 @@ class MainWindow(QMainWindow):
     
     
     def perform_update(self, download_url):
-        """ Скачивает новый exe, заменяет текущий, запускает обновлённый """
+        """ Скачивает новый exe, заменяет текущий, запускает обновлённую """
         try:
             import requests
             import sys
             import tempfile
             import os
     
-            # путь к текущему exe
             current_path = sys.executable
-    
-            # имя exe (нужно для tasklist)
             exe_name = os.path.basename(current_path)
     
-            # путь к временному exe
             tmp_dir = tempfile.gettempdir()
             new_exe = os.path.join(tmp_dir, "update_new.exe")
     
-            # скачиваем новый EXE
+            # === СКАЧИВАЕМ НОВУЮ ВЕРСИЮ ===
             r = requests.get(download_url, stream=True)
             with open(new_exe, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
+                for chunk in r.iter_content(8192):
                     if chunk:
                         f.write(chunk)
     
-            # создаем BAT файл, который:
-            # - ждет, пока текущий EXE полностью завершится
-            # - заменяет его
-            # - запускает новый
-            # - удаляет временные файлы
+            # === UPDATE.BAT (CP866 совместимый!) ===
             updater_path = os.path.join(tmp_dir, "update.bat")
     
-            with open(updater_path, "w", encoding="utf-8") as bat:
+            with open(updater_path, "w", encoding="cp866") as bat:
                 bat.write(f"""@echo off
-                    echo Обновление программы...
-                    echo Ожидание завершения процесса {exe_name}...
+                    
+                    title Updating...
+                    
+                    echo Waiting for {exe_name} to exit...
                     
                     :waitloop
                     tasklist | find /i "{exe_name}" >nul
@@ -654,24 +648,22 @@ class MainWindow(QMainWindow):
                         goto waitloop
                     )
                     
-                    echo Копирование обновления...
+                    echo Updating file...
                     copy /y "{new_exe}" "{current_path}" >nul
-                    
-                    echo Запуск новой версии...
-                    start "" "{current_path}"
-                    
+                                        
                     del "{new_exe}"
                     del "%~f0"
                     """)
     
-            # запускаем updater
+            # === ЗАПУСК UPDATE.BAT ===
             os.startfile(updater_path)
     
-            # закрываем приложение
-            QApplication.instance().quit()
+            # === ЖЁСТКО ЗАКРЫВАЕМ ПРОЦЕСС ===
+            os.system(f'taskkill /F /PID {os.getpid()}')
     
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось обновить программу:\n{e}")
+    
 
 
 
