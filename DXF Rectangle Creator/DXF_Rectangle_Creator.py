@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QUrl, QSettings
 from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage
 from ezdxf.math import Matrix44
 
-CURRENT_VERSION = "1.1.3"
+CURRENT_VERSION = "1.1.4"
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
 class ArrayEntry(QWidget):
@@ -208,9 +208,9 @@ class MainWindow(QMainWindow):
         buttonsLayout.addWidget(self.generateButton)
         self.exportPng = QCheckBox("Вывести PNG")
         buttonsLayout.addWidget(self.exportPng)
-        self.btnCheckUpdate = QPushButton("Проверка обновления")
+        #self.btnCheckUpdate = QPushButton("Проверка обновления")
         #self.btnCheckUpdate.clicked.connect(self.check_update)
-        buttonsLayout.addWidget(self.btnCheckUpdate)
+        #buttonsLayout.addWidget(self.btnCheckUpdate)
         controlsLayout.addLayout(buttonsLayout)
 
         mainLayout.addWidget(controlsWidget)
