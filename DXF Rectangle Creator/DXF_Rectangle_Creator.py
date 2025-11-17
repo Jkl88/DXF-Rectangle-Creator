@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QUrl, QSettings
 from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage
 from ezdxf.math import Matrix44
 
-CURRENT_VERSION = "1.0.2"
+CURRENT_VERSION = "1.1.0"
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
 class ArrayEntry(QWidget):
@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
         self.exportPng = QCheckBox("Вывести PNG")
         buttonsLayout.addWidget(self.exportPng)
         self.btnCheckUpdate = QPushButton("Проверка обновления")
-        self.btnCheckUpdate.clicked.connect(self.check_update)
+        #self.btnCheckUpdate.clicked.connect(self.check_update)
         buttonsLayout.addWidget(self.btnCheckUpdate)
         controlsLayout.addLayout(buttonsLayout)
 
@@ -226,7 +226,7 @@ class MainWindow(QMainWindow):
 
         # Список цветов для массивов (назначаются циклически)
         self.color_list = ["red", "blue", "green", "orange", "purple", "magenta", "cyan"]
-
+        self.check_update()
         self.update_preview()
 
     def add_array(self):
@@ -590,7 +590,7 @@ class MainWindow(QMainWindow):
                 return
     
             if latest == CURRENT_VERSION:
-                QMessageBox.information(self, "Обновление", "У вас последняя версия.")
+                #QMessageBox.information(self, "Обновление", "У вас последняя версия.")
                 return
     
             # --- найдено обновление ---
@@ -634,12 +634,12 @@ class MainWindow(QMainWindow):
     
             with open(updater_path, "w", encoding="utf-8") as bat:
                 bat.write(f"""
-    @echo off
-    timeout /t 2 >nul
-    copy /y "{new_exe}" "{current_path}"
-    start "" "{current_path}"
-    del "{new_exe}"
-    del "%~f0"
+                @echo off
+                timeout /t 2 >nul
+                copy /y "{new_exe}" "{current_path}"
+                start "" "{current_path}"
+                del "{new_exe}"
+                del "%~f0"
                 """)
     
             # запускаем апдейтер
