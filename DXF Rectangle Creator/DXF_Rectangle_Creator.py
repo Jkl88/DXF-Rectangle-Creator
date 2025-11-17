@@ -14,7 +14,7 @@ from PyQt6.QtCore import Qt, QUrl, QSettings
 from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage
 from ezdxf.math import Matrix44
 
-CURRENT_VERSION = "1.1.0"
+CURRENT_VERSION = "1.1.1"
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
 class ArrayEntry(QWidget):
@@ -611,45 +611,68 @@ class MainWindow(QMainWindow):
     
     
     def perform_update(self, download_url):
-        """ Скачивает exe, заменяет текущий и запускает новый """
+        """ Скачивает новый exe, заменяет текущий, запускает обновлённый """
         try:
+            import requests
+            import sys
+            import tempfile
+            import os
+    
             # путь к текущему exe
             current_path = sys.executable
     
-            # путь к временному файлу для загрузки
+            # имя exe (нужно для tasklist)
+            exe_name = os.path.basename(current_path)
+    
+            # путь к временному exe
             tmp_dir = tempfile.gettempdir()
             new_exe = os.path.join(tmp_dir, "update_new.exe")
     
-            # скачиваем новый файл
+            # скачиваем новый EXE
             r = requests.get(download_url, stream=True)
-            total = int(r.headers.get("content-length", 0))
-    
             with open(new_exe, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
     
-            # создаём батник, который заменит EXE после выхода программы
+            # создаем BAT файл, который:
+            # - ждет, пока текущий EXE полностью завершится
+            # - заменяет его
+            # - запускает новый
+            # - удаляет временные файлы
             updater_path = os.path.join(tmp_dir, "update.bat")
     
             with open(updater_path, "w", encoding="utf-8") as bat:
-                bat.write(f"""
-                @echo off
-                timeout /t 2 >nul
-                copy /y "{new_exe}" "{current_path}"
-                start "" "{current_path}"
-                del "{new_exe}"
-                del "%~f0"
-                """)
+                bat.write(f"""@echo off
+                    echo Обновление программы...
+                    echo Ожидание завершения процесса {exe_name}...
+                    
+                    :waitloop
+                    tasklist | find /i "{exe_name}" >nul
+                    if not errorlevel 1 (
+                        timeout /t 1 >nul
+                        goto waitloop
+                    )
+                    
+                    echo Копирование обновления...
+                    copy /y "{new_exe}" "{current_path}" >nul
+                    
+                    echo Запуск новой версии...
+                    start "" "{current_path}"
+                    
+                    del "{new_exe}"
+                    del "%~f0"
+                    """)
     
-            # запускаем апдейтер
+            # запускаем updater
             os.startfile(updater_path)
     
-            # закрываем программу
+            # закрываем приложение
             QApplication.instance().quit()
     
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось обновить:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось обновить программу:\n{e}")
+
 
 
 def main():
