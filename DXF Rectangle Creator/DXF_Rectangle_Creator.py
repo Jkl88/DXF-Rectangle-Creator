@@ -9,13 +9,385 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QFileDialog,
     QMessageBox, QScrollArea, QGraphicsView, QGraphicsScene, QCheckBox,
-    QRadioButton, QButtonGroup
+    QRadioButton, QButtonGroup, QGraphicsObject
 )
-from PyQt6.QtCore import Qt, QUrl, QSettings
-from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage
+from PyQt6.QtCore import Qt, QUrl, QSettings, QRectF, QPointF
+from PyQt6.QtGui import (
+    QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage, QFont,
+    QPainterPathStroker, QFontMetrics
+)
 from ezdxf.math import Matrix44
 
-CURRENT_VERSION = "1.1.6"
+CURRENT_VERSION = "1.1.7"
+
+DIM_STEP = 11
+DIM_EXT = 7
+TEXT_OFF = 2
+
+
+class PreviewView(QGraphicsView):
+    """Панорама (СКМ / ЛКМ по фону) и масштаб колёсиком."""
+
+    def __init__(self, scene, on_user_view=None, parent=None):
+        super().__init__(scene, parent)
+        self._on_user_view = on_user_view
+        self._panning = False
+        self._pan_start = QPointF()
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+
+    def _notify_user_view(self):
+        if self._on_user_view:
+            self._on_user_view()
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y() == 0:
+            return
+        factor = 1.12 if event.angleDelta().y() > 0 else 1 / 1.12
+        self.scale(factor, factor)
+        self._notify_user_view()
+        event.accept()
+
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton) or (
+            event.button() == Qt.MouseButton.LeftButton and item is None
+        ):
+            self._panning = True
+            self._pan_start = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            delta = event.position() - self._pan_start
+            self._pan_start = event.position()
+            t = self.transform()
+            self.setTransform(QTransform(
+                t.m11(), t.m12(), t.m21(), t.m22(),
+                t.dx() + delta.x(), t.dy() + delta.y(),
+            ))
+            self._notify_user_view()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._panning:
+            self._panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class DimItem(QGraphicsObject):
+    """Размерная линия с подписью; перетаскивание — дальше/ближе от детали."""
+
+    def __init__(self, dim_id, side, a1, a2, ref, text, color, font, initial_offset=None):
+        super().__init__()
+        self.dim_id = dim_id
+        self.side = side
+        self.a1 = min(a1, a2)
+        self.a2 = max(a1, a2)
+        self.ref = ref
+        self.text = text
+        self.color = QColor(color)
+        self.font = QFont(font)
+        self.offset = initial_offset if initial_offset is not None else DIM_EXT
+        self._dragging = False
+        self._drag_start_offset = self.offset
+        self._drag_start_pos = None
+        self.setZValue(10)
+        self.setAcceptHoverEvents(True)
+
+    def _line_pos(self):
+        if self.side == "bottom":
+            return self.ref + self.offset
+        if self.side == "top":
+            return self.ref - self.offset
+        if self.side == "left":
+            return self.ref - self.offset
+        return self.ref + self.offset
+
+    def _layout(self):
+        lp = self._line_pos()
+        lines = []
+        if self.side in ("bottom", "top"):
+            lines.append((self.a1, self.ref, self.a1, lp))
+            lines.append((self.a2, self.ref, self.a2, lp))
+            lines.append((self.a1, lp, self.a2, lp))
+        else:
+            lines.append((self.ref, self.a1, lp, self.a1))
+            lines.append((self.ref, self.a2, lp, self.a2))
+            lines.append((lp, self.a1, lp, self.a2))
+        return lines, lp
+
+    def _text_rect(self, lp):
+        metrics = QFontMetrics(self.font)
+        tw = metrics.horizontalAdvance(self.text)
+        th = metrics.height()
+        if self.side == "bottom":
+            return QRectF((self.a1 + self.a2) / 2 - tw / 2, lp + TEXT_OFF, tw, th)
+        if self.side == "top":
+            return QRectF((self.a1 + self.a2) / 2 - tw / 2, lp - TEXT_OFF - th, tw, th)
+        if self.side == "left":
+            return QRectF(lp - TEXT_OFF - th, (self.a1 + self.a2) / 2 - tw / 2, th, tw)
+        return QRectF(lp + TEXT_OFF, (self.a1 + self.a2) / 2 - tw / 2, th, tw)
+
+    def boundingRect(self):
+        lines, lp = self._layout()
+        rect = QRectF()
+        for x1, y1, x2, y2 in lines:
+            rect = rect.united(QRectF(QPointF(x1, y1), QPointF(x2, y2)))
+        rect = rect.united(self._text_rect(lp))
+        return rect.adjusted(-4, -4, 4, 4)
+
+    def paint(self, painter, option, widget=None):
+        lines, lp = self._layout()
+        pen = QPen(self.color)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setFont(self.font)
+        for x1, y1, x2, y2 in lines:
+            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+        metrics = painter.fontMetrics()
+        tw = metrics.horizontalAdvance(self.text)
+        th = metrics.height()
+        if self.side == "bottom":
+            painter.drawText(QPointF((self.a1 + self.a2) / 2 - tw / 2, lp + TEXT_OFF + metrics.ascent()), self.text)
+        elif self.side == "top":
+            painter.drawText(QPointF((self.a1 + self.a2) / 2 - tw / 2, lp - TEXT_OFF - th + metrics.ascent()), self.text)
+        elif self.side == "left":
+            painter.save()
+            painter.translate(lp - TEXT_OFF - th, (self.a1 + self.a2) / 2 + tw / 2)
+            painter.rotate(-90)
+            painter.drawText(QPointF(0, metrics.ascent()), self.text)
+            painter.restore()
+        else:
+            painter.save()
+            painter.translate(lp + TEXT_OFF, (self.a1 + self.a2) / 2 + tw / 2)
+            painter.rotate(-90)
+            painter.drawText(QPointF(0, metrics.ascent()), self.text)
+            painter.restore()
+
+    def shape(self):
+        path = QPainterPath()
+        lines, _ = self._layout()
+        for x1, y1, x2, y2 in lines:
+            path.moveTo(x1, y1)
+            path.lineTo(x2, y2)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(10)
+        return stroker.createStroke(path)
+
+    def hoverEnterEvent(self, event):
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().hoverEnterEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_start_pos = event.scenePos()
+            self._drag_start_offset = self.offset
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            delta = event.scenePos() - self._drag_start_pos
+            if self.side == "bottom":
+                self.offset = max(3, self._drag_start_offset + delta.y())
+            elif self.side == "top":
+                self.offset = max(3, self._drag_start_offset - delta.y())
+            elif self.side == "left":
+                self.offset = max(3, self._drag_start_offset - delta.x())
+            else:
+                self.offset = max(3, self._drag_start_offset + delta.x())
+            self.prepareGeometryChange()
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging:
+            self._dragging = False
+            for view in self.scene().views():
+                w = view.window()
+                if hasattr(w, "save_dim_offset"):
+                    w.save_dim_offset(self.dim_id, self.offset)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class LeaderNoteItem(QGraphicsObject):
+    """Сноска с выносной линией; текст перетаскивается мышью."""
+
+    def __init__(self, note_id, anchor_x, anchor_y, text, color, font, text_offset=None):
+        super().__init__()
+        self.note_id = note_id
+        self.anchor = QPointF(anchor_x, anchor_y)
+        self.text = text
+        self.color = QColor(color)
+        self.font = QFont(font)
+        if text_offset is None:
+            self.text_offset = QPointF(-50, -20)
+        elif isinstance(text_offset, QPointF):
+            self.text_offset = QPointF(text_offset)
+        else:
+            self.text_offset = QPointF(text_offset[0], text_offset[1])
+        self._dragging = False
+        self._drag_start = None
+        self._offset_start = None
+        self.setZValue(11)
+        self.setAcceptHoverEvents(True)
+
+    def text_pos(self):
+        return self.anchor + self.text_offset
+
+    def boundingRect(self):
+        tp = self.text_pos()
+        br_w = len(self.text) * self.font.pointSize() * 0.55
+        br_h = self.font.pointSize() + 4
+        rect = QRectF(tp.x(), tp.y(), br_w, br_h)
+        rect = rect.united(QRectF(self.anchor, tp))
+        return rect.adjusted(-4, -4, 4, 4)
+
+    def paint(self, painter, option, widget=None):
+        tp = self.text_pos()
+        pen = QPen(self.color)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.setFont(self.font)
+        metrics = painter.fontMetrics()
+        tw = metrics.horizontalAdvance(self.text)
+        th = metrics.height()
+        painter.drawLine(self.anchor, QPointF(tp.x() + tw, tp.y() + th / 2))
+        painter.drawText(QPointF(tp.x(), tp.y() + metrics.ascent()), self.text)
+
+    def shape(self):
+        path = QPainterPath()
+        tp = self.text_pos()
+        path.addRect(QRectF(tp.x(), tp.y(), len(self.text) * 6, self.font.pointSize() + 6))
+        return path
+
+    def hoverEnterEvent(self, event):
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        super().hoverEnterEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_start = event.scenePos()
+            self._offset_start = QPointF(self.text_offset)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self.text_offset = self._offset_start + (event.scenePos() - self._drag_start)
+            self.prepareGeometryChange()
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging:
+            self._dragging = False
+            for view in self.scene().views():
+                w = view.window()
+                if hasattr(w, "save_note_offset"):
+                    w.save_note_offset(self.note_id, self.text_offset)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class PreviewBuilder:
+    """Сборка сцены: габариты снизу/справа, межосевые сверху/слева."""
+
+    def __init__(self, scene, part_w, part_h, font, dim_offsets, note_offsets):
+        self.scene = scene
+        self.pw = part_w
+        self.ph = part_h
+        self.font = font
+        self.dim_offsets = dim_offsets
+        self.note_offsets = note_offsets
+        self._top_lane = 0
+        self._left_lane = 0
+
+    def _off(self, dim_id, lane_extra=0):
+        base = self.dim_offsets.get(dim_id)
+        if base is not None:
+            return base
+        return DIM_EXT + lane_extra * DIM_STEP
+
+    def add_dim(self, dim_id, side, a1, a2, ref, text, color, lane=0):
+        offset = self._off(dim_id, lane)
+        item = DimItem(dim_id, side, a1, a2, ref, text, color, self.font, offset)
+        self.scene.addItem(item)
+
+    def add_center_lines(self, ox, oy, cv, gv, ch, gh, color):
+        pen = QPen(QColor(color))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        ext = max(gh, gv) * 0.15 + 4
+        for i in range(cv):
+            cy = oy + i * gv
+            self.scene.addLine(ox - ext, cy, ox + (ch - 1) * gh + ext, cy, pen)
+        for j in range(ch):
+            cx = ox + j * gh
+            self.scene.addLine(cx, oy - ext, cx, oy + (cv - 1) * gv + ext, pen)
+
+    def add_hole_note(self, note_id, ax, ay, text, color):
+        off = self.note_offsets.get(note_id)
+        if off is not None:
+            offset = (off.x(), off.y())
+        else:
+            try:
+                idx = int(note_id[1:note_id.index("_")])
+            except ValueError:
+                idx = 0
+            offset = (-55, -18 - idx * 16)
+        item = LeaderNoteItem(note_id, ax, ay, text, color, self.font, offset)
+        self.scene.addItem(item)
+
+    def add_corner_note(self, note_id, ax, ay, text, color):
+        off = self.note_offsets.get(note_id)
+        if off is not None:
+            offset = (off.x(), off.y())
+        else:
+            offset = (12, 12)
+        item = LeaderNoteItem(note_id, ax, ay, text, color, self.font, offset)
+        self.scene.addItem(item)
+
+    def array_dims(self, idx, ox, oy, cv, gv, ch, gh, color):
+        p = f"a{idx}"
+        lane_t, lane_l = 0, 0
+        self.add_dim(f"{p}_ox", "top", 0, ox, oy, f"{ox:.1f}", color, lane_t)
+        lane_t += 1
+        if ch > 1:
+            self.add_dim(f"{p}_gh", "top", ox, ox + gh, oy, f"{gh:.1f}", color, lane_t)
+            lane_t += 1
+            if ch > 2:
+                self.add_dim(f"{p}_span", "top", ox, ox + (ch - 1) * gh, oy, f"{(ch - 1) * gh:.1f}", color, lane_t)
+        self.add_dim(f"{p}_oy", "left", 0, oy, ox, f"{oy:.1f}", color, lane_l)
+        lane_l += 1
+        if cv > 1:
+            self.add_dim(f"{p}_gv", "left", oy, oy + gv, ox, f"{gv:.1f}", color, lane_l)
+
+    def overall_dims(self):
+        self.add_dim("w_all", "bottom", 0, self.pw, self.ph, f"{self.pw:.1f}", "black", 0)
+        self.add_dim("h_all", "right", 0, self.ph, self.pw, f"{self.ph:.1f}", "black", 0)
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
 class ArrayEntry(QWidget):
@@ -228,16 +600,39 @@ class MainWindow(QMainWindow):
         #buttonsLayout.addWidget(self.btnCheckUpdate)
         controlsLayout.addLayout(buttonsLayout)
 
+        previewControls = QHBoxLayout()
+        previewControls.addWidget(QLabel("Шрифт:"))
+        self.spinPreviewFont = QSpinBox()
+        self.spinPreviewFont.setRange(6, 24)
+        self.spinPreviewFont.setValue(9)
+        self.spinPreviewFont.setToolTip("Размер шрифта подписей в предпросмотре")
+        self.spinPreviewFont.valueChanged.connect(self.update_preview)
+        previewControls.addWidget(self.spinPreviewFont)
+        self.btnFitPreview = QPushButton("Вписать")
+        self.btnFitPreview.setToolTip("Вписать чертёж в окно предпросмотра")
+        self.btnFitPreview.clicked.connect(self.reset_preview_view)
+        previewControls.addWidget(self.btnFitPreview)
+        previewControls.addWidget(QLabel("ЛКМ: размер/сноска | колёсико: масштаб | ПКМ/фон: перемещение"))
+        previewControls.addStretch()
+        controlsLayout.addLayout(previewControls)
+
         mainLayout.addWidget(controlsWidget)
+
+        self._dim_offsets = {}
+        self._note_offsets = {}
+        self._user_view = False
 
         # Предпросмотр (нижняя часть)
         self.previewScene = QGraphicsScene(self)
-        self.previewView = QGraphicsView(self.previewScene)
+        self.previewView = PreviewView(self.previewScene, on_user_view=self._on_user_view)
         self.previewView.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.previewView.setMinimumHeight(400)
-        # Инвертируем ось Y, чтобы (0,0) было в нижнем левом углу
-        #self.previewView.setTransform(QTransform().scale(1, -1))
-        mainLayout.addWidget(self.previewView)
+        self.previewView.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.previewView.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.previewView.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.previewView.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        mainLayout.addWidget(self.previewView, 1)
 
         # Список цветов для массивов (назначаются циклически)
         self.color_list = ["red", "blue", "green", "orange", "purple", "magenta", "cyan"]
@@ -337,166 +732,109 @@ class MainWindow(QMainWindow):
         array_entry.removeButton.clicked.connect(self.update_preview)
         self.update_preview()
 
+    def _on_user_view(self):
+        self._user_view = True
+
+    def save_dim_offset(self, dim_id, offset):
+        self._dim_offsets[dim_id] = offset
+
+    def save_note_offset(self, note_id, offset):
+        self._note_offsets[note_id] = QPointF(offset)
+
+    def reset_preview_view(self):
+        self._user_view = False
+        self.previewView.resetTransform()
+        self._fit_preview()
+
+    def _preview_font(self):
+        font = QFont()
+        font.setPointSize(self.spinPreviewFont.value())
+        return font
+
     def save_preview_image(self, file_path_without_ext):
-        # получаем сцену
-        scene = self.previewScene
-
-        # границы сцены
-        rect = scene.sceneRect()
-
-        # создаём QImage подходящего размера
-        img = QImage(int(rect.width()), int(rect.height()), QImage.Format.Format_ARGB32)
+        img = QImage(
+            self.previewView.viewport().size(),
+            QImage.Format.Format_ARGB32,
+        )
         img.fill(Qt.GlobalColor.white)
-
         painter = QPainter(img)
-
-        # Рисуем сцену в изображение
-        scene.render(painter)
+        self.previewView.render(painter)
         painter.end()
-
-        # сохраняем PNG
         out_path = file_path_without_ext + ".png"
         img.save(out_path)
-
         return out_path
+
+    def _fit_preview(self):
+        rect = self.previewScene.sceneRect()
+        if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+            self.previewView.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if not self._user_view:
+            self._fit_preview()
+
     def update_preview(self):
+        saved_transform = self.previewView.transform() if self._user_view else None
         self.previewScene.clear()
 
-        # -------------------------------
-        #  ПАРАМЕТРЫ
-        # -------------------------------
         width = self.spinWidth.value()
         height = self.spinHeight.value()
         corner_radius = self.spinCornerRadius.value()
+        font = self._preview_font()
+        builder = PreviewBuilder(
+            self.previewScene, width, height, font, self._dim_offsets, self._note_offsets
+        )
 
-        margin = 10     # большой отступ под размеры
-        max_x = width
-        max_y = height
-
-        # -------------------------------
-        #  ПРЯМОУГОЛЬНИК
-        # -------------------------------
         self.add_rectangle_to_scene(width, height, corner_radius)
 
-        # -------------------------------
-        #  ОТВЕРСТИЯ И ПОДПИСИ
-        # -------------------------------
         for idx in range(self.arraysLayout.count()):
             widget = self.arraysLayout.itemAt(idx).widget()
             if widget is None:
                 continue
 
-            (ox, oy, d, cv, gv, ch, gh) = widget.get_values()
-            rr = d/2
-            color = QColor(self.color_list[idx % len(self.color_list)])
-            pen_arr = QPen(color)
+            values = widget.get_values()
+            color = self.color_list[idx % len(self.color_list)]
+            pen_arr = QPen(QColor(color))
             pen_arr.setCosmetic(True)
-            widget.label.setStyleSheet(f"color: {self.color_list[idx % len(self.color_list)]};")
+            widget.label.setStyleSheet(f"color: {color};")
 
-            # Рисуем отверстия
+            ox, oy, d, cv, gv, ch, gh = values
+            rr = d / 2
             for i in range(cv):
                 for j in range(ch):
                     cx = ox + j * gh
                     cy = oy + i * gv
+                    self.previewScene.addEllipse(cx - rr, cy - rr, d, d, pen_arr)
 
-                    self.previewScene.addEllipse(cx-rr, cy-rr, d, d, pen_arr)
+            builder.add_center_lines(ox, oy, cv, gv, ch, gh, color)
+            builder.array_dims(idx, ox, oy, cv, gv, ch, gh, color)
+            builder.add_hole_note(f"n{idx}_dia", ox, oy, f"Ø{d:.1f}  {cv * ch} отв.", color)
 
-                    max_x = max(max_x, cx + rr)
-                    max_y = max(max_y, cy + rr)
-
-            # ======= ПОДПИСИ (точная привязка) ========
-
-            lx = ox
-            ly = oy
-
-            # 1) Отступ X — строго слева от отверстия
-
-            self.previewScene.addLine(ox + rr + 2, oy, 0, oy, color)
-            txt_x = self.previewScene.addText(f"{ox:.1f} мм")
-            txt_x.setDefaultTextColor(color)
-            rect = txt_x.boundingRect()
-            txt_x.setPos(ox/2 - rect.width()/2, oy - 20)
-
-            # 2) Отступ Y — строго над отверстием
-            self.previewScene.addLine(ox, oy + rr + 2, ox, 0, color)
-            txt_y = self.previewScene.addText(f"{oy:.1f} мм")
-            txt_y.setDefaultTextColor(color)
-            txt_y.setRotation(-90)
-            rect = txt_y.boundingRect()
-            txt_y.setPos(ox, oy/2 + rect.width()/2)
-
-            # 3) Диаметр
-            txt_d = self.previewScene.addText(f"Ø {d:.1f}")
-            txt_d.setDefaultTextColor(color)
-            txt_d.setPos(lx + rr - 5, ly + rr - 5)
-
-            # 4) Шаг X — между отверстиями
-            if ch > 1:
-                mid_x = ox + gh * (ch - 1) / 2
-                self.previewScene.addLine(ox + gh + rr + 2, oy, ox, oy, color)
-                txt_sx = self.previewScene.addText(f"{gh:.1f} мм")
-                txt_sx.setDefaultTextColor(color)
-                rect = txt_sx.boundingRect()
-                txt_sx.setPos(ox + gh/2 - rect.width()/2, oy - 20)
-
-            # 5) Шаг Y — между отверстиями
-            if cv > 1:
-                mid_y = oy + gv * (cv - 1) / 2
-                self.previewScene.addLine(ox, oy + gv + rr + 2, ox, oy, color)
-                txt_sy = self.previewScene.addText(f"{gv:.1f} мм")
-                txt_sy.setDefaultTextColor(color)
-                txt_sy.setRotation(-90)
-                rect = txt_sy.boundingRect()
-                txt_sy.setPos(ox, gv/2 + oy + rect.width()/2)
-
-        # -------------------------------
-        #  ГАБАРИТНЫЕ РАЗМЕРЫ
-        # -------------------------------
-        dim_pen = QPen(Qt.GlobalColor.black)
-        dim_pen.setCosmetic(True)
-
-        # --- ширина ---
-        self.previewScene.addLine(0, height + 15, width, height + 15, dim_pen)
-        self.previewScene.addLine(0, height + 10, 0, height + 20, dim_pen)
-        self.previewScene.addLine(width, height + 10, width, height + 20, dim_pen)
-
-        txt_w = self.previewScene.addText(f"{width:.2f} мм")
-        txt_w.setPos(width/2 - 25, height + 15)
-
-        # --- высота ---
-        self.previewScene.addLine(-15, 0, -15, height, dim_pen)
-        self.previewScene.addLine(-10, 0, -20, 0, dim_pen)
-        self.previewScene.addLine(-10, height, -20, height, dim_pen)
-
-        txt_h = self.previewScene.addText(f"{height:.2f} мм")
-        txt_h.setRotation(-90)
-        rect = txt_h.boundingRect()
-        txt_h.setPos(-35-(rect.height()/2 - 10), height/2 + rect.width()/2)
-
-        # --- радиус / фаска ---
         if corner_radius > 0:
             if self.is_chamfer_mode():
-                txt_r = self.previewScene.addText(f"C={corner_radius:.1f}")
+                corner_text = f"{corner_radius:.0f}x45°  4 фаски"
             else:
-                txt_r = self.previewScene.addText(f"R={corner_radius:.1f}")
-            txt_r.setPos(width - corner_radius - 40, height - corner_radius + 20)
+                corner_text = f"R{corner_radius:.1f}"
+            builder.add_corner_note(
+                "corner",
+                width - corner_radius,
+                height - corner_radius,
+                corner_text,
+                "black",
+            )
 
-        # -------------------------------
-        #  ГРАНИЦА СЦЕНЫ + fitInView
-        # -------------------------------
-        self.previewScene.setSceneRect(
-            -margin - 50,
-            -margin - 50,
-            max_x + 2 * margin + 50,
-            max_y + 2 * margin + 80,
-        )
+        builder.overall_dims()
 
-        self.previewView.fitInView(
-            self.previewScene.sceneRect(),
-            Qt.AspectRatioMode.KeepAspectRatio
-        )
+        bounds = self.previewScene.itemsBoundingRect()
+        pad = 4
+        self.previewScene.setSceneRect(bounds.adjusted(-pad, -pad, pad, pad))
 
-        # автоимя
+        if saved_transform is not None:
+            self.previewView.setTransform(saved_transform)
+        else:
+            self._fit_preview()
+
         self.lineName.setText(f"R_{width:.2f}x{height:.2f}")
 
     def generate_dxf(self):
