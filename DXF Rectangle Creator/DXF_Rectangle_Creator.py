@@ -8,13 +8,14 @@ import ezdxf
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QDoubleSpinBox, QSpinBox, QLineEdit, QPushButton, QFileDialog,
-    QMessageBox, QScrollArea, QGraphicsView, QGraphicsScene, QCheckBox
+    QMessageBox, QScrollArea, QGraphicsView, QGraphicsScene, QCheckBox,
+    QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import Qt, QUrl, QSettings
 from PyQt6.QtGui import QPainter, QTransform, QColor, QPen, QDesktopServices, QPainterPath, QImage
 from ezdxf.math import Matrix44
 
-CURRENT_VERSION = "1.1.4"
+CURRENT_VERSION = "1.1.6"
 
 # Виджет для ввода параметров массива отверстий (прямоугольная сетка)
 class ArrayEntry(QWidget):
@@ -170,7 +171,20 @@ class MainWindow(QMainWindow):
         self.spinHeight.setSuffix(" мм")
         self.spinHeight.setToolTip("Задайте высоту прямоугольника")
         row2.addWidget(self.spinHeight)
-        row2.addWidget(QLabel("Радиус скругления:"))
+
+        self.radioCornerRadius = QRadioButton("Радиус")
+        self.radioCornerRadius.setChecked(True)
+        self.radioCornerRadius.setToolTip("Скругление углов по радиусу")
+        self.radioCornerChamfer = QRadioButton("Фаска")
+        self.radioCornerChamfer.setToolTip("Срез углов под 45°")
+        self.cornerModeGroup = QButtonGroup(self)
+        self.cornerModeGroup.addButton(self.radioCornerRadius)
+        self.cornerModeGroup.addButton(self.radioCornerChamfer)
+        row2.addWidget(self.radioCornerRadius)
+        row2.addWidget(self.radioCornerChamfer)
+
+        self.labelCornerSize = QLabel("Размер:")
+        row2.addWidget(self.labelCornerSize)
         self.spinCornerRadius = QDoubleSpinBox()
         self.spinCornerRadius.setMinimum(0.0)
         self.spinCornerRadius.setMaximum(10000.0)
@@ -182,9 +196,10 @@ class MainWindow(QMainWindow):
         controlsLayout.addLayout(row2)
 
         # Обновление предпросмотра при изменении размеров
-        self.spinWidth.valueChanged.connect(self.update_preview)
-        self.spinHeight.valueChanged.connect(self.update_preview)
+        self.spinWidth.valueChanged.connect(self.update_corner_size_limit)
+        self.spinHeight.valueChanged.connect(self.update_corner_size_limit)
         self.spinCornerRadius.valueChanged.connect(self.update_preview)
+        self.cornerModeGroup.buttonClicked.connect(self.on_corner_mode_changed)
 
         # Метка для массивов отверстий
         controlsLayout.addWidget(QLabel("Массивы отверстий:"))
@@ -227,7 +242,87 @@ class MainWindow(QMainWindow):
         # Список цветов для массивов (назначаются циклически)
         self.color_list = ["red", "blue", "green", "orange", "purple", "magenta", "cyan"]
         self.check_update()
+        self.update_corner_size_limit()
+
+    def max_corner_size(self):
+        return min(self.spinWidth.value(), self.spinHeight.value()) * 0.5
+
+    def corner_size_tooltip(self):
+        max_size = self.max_corner_size()
+        limit = f" (макс. {max_size:.2f} мм — 50% меньшей стороны)"
+        if self.is_chamfer_mode():
+            return "Задайте размер фаски углов прямоугольника" + limit
+        return "Задайте радиус скругления углов прямоугольника" + limit
+
+    def update_corner_size_limit(self):
+        max_size = max(0.0, self.max_corner_size())
+        self.spinCornerRadius.setMaximum(max_size)
+        if self.spinCornerRadius.value() > max_size:
+            self.spinCornerRadius.setValue(max_size)
+        self.spinCornerRadius.setToolTip(self.corner_size_tooltip())
         self.update_preview()
+
+    def is_chamfer_mode(self):
+        return self.radioCornerChamfer.isChecked()
+
+    def on_corner_mode_changed(self):
+        self.spinCornerRadius.setToolTip(self.corner_size_tooltip())
+        self.update_preview()
+
+    def chamfered_rect_points(self, width, height, chamfer):
+        if chamfer <= 0:
+            return [(0, 0), (width, 0), (width, height), (0, height), (0, 0)]
+        return [
+            (chamfer, 0),
+            (width - chamfer, 0),
+            (width, chamfer),
+            (width, height - chamfer),
+            (width - chamfer, height),
+            (chamfer, height),
+            (0, height - chamfer),
+            (0, chamfer),
+            (chamfer, 0),
+        ]
+
+    def add_rectangle_to_scene(self, width, height, corner_size):
+        pen_rect = QPen(Qt.GlobalColor.black)
+        pen_rect.setCosmetic(True)
+
+        if corner_size <= 0:
+            self.previewScene.addRect(0, 0, width, height, pen_rect)
+            return
+
+        if self.is_chamfer_mode():
+            path = QPainterPath()
+            pts = self.chamfered_rect_points(width, height, corner_size)
+            path.moveTo(*pts[0])
+            for x, y in pts[1:]:
+                path.lineTo(x, y)
+            self.previewScene.addPath(path, pen_rect)
+        else:
+            path = QPainterPath()
+            path.addRoundedRect(0, 0, width, height, corner_size, corner_size)
+            self.previewScene.addPath(path, pen_rect)
+
+    def add_rectangle_to_dxf(self, msp, width, height, corner_size):
+        if corner_size <= 0:
+            pts = [(0, 0), (width, 0), (width, height), (0, height), (0, 0)]
+            msp.add_lwpolyline(pts, close=True)
+            return
+
+        if self.is_chamfer_mode():
+            msp.add_lwpolyline(self.chamfered_rect_points(width, height, corner_size), close=True)
+            return
+
+        r = corner_size
+        msp.add_line((r, 0), (width - r, 0))
+        msp.add_arc(center=(width - r, r), radius=r, start_angle=270, end_angle=360)
+        msp.add_line((width, r), (width, height - r))
+        msp.add_arc(center=(width - r, height - r), radius=r, start_angle=0, end_angle=90)
+        msp.add_line((width - r, height), (r, height))
+        msp.add_arc(center=(r, height - r), radius=r, start_angle=90, end_angle=180)
+        msp.add_line((0, height - r), (0, r))
+        msp.add_arc(center=(r, r), radius=r, start_angle=180, end_angle=270)
 
     def add_array(self):
         array_entry = ArrayEntry(self.arraysContainer)
@@ -281,15 +376,7 @@ class MainWindow(QMainWindow):
         # -------------------------------
         #  ПРЯМОУГОЛЬНИК
         # -------------------------------
-        pen_rect = QPen(Qt.GlobalColor.black)
-        pen_rect.setCosmetic(True)
-
-        if corner_radius > 0:
-            path = QPainterPath()
-            path.addRoundedRect(0, 0, width, height, corner_radius, corner_radius)
-            self.previewScene.addPath(path, pen_rect)
-        else:
-            self.previewScene.addRect(0, 0, width, height, pen_rect)
+        self.add_rectangle_to_scene(width, height, corner_radius)
 
         # -------------------------------
         #  ОТВЕРСТИЯ И ПОДПИСИ
@@ -350,7 +437,7 @@ class MainWindow(QMainWindow):
                 txt_sx = self.previewScene.addText(f"{gh:.1f} мм")
                 txt_sx.setDefaultTextColor(color)
                 rect = txt_sx.boundingRect()
-                txt_sx.setPos((ox + gh)/2 - rect.width()/2, oy - 20)
+                txt_sx.setPos(ox + gh/2 - rect.width()/2, oy - 20)
 
             # 5) Шаг Y — между отверстиями
             if cv > 1:
@@ -386,9 +473,12 @@ class MainWindow(QMainWindow):
         rect = txt_h.boundingRect()
         txt_h.setPos(-35-(rect.height()/2 - 10), height/2 + rect.width()/2)
 
-        # --- радиус ---
+        # --- радиус / фаска ---
         if corner_radius > 0:
-            txt_r = self.previewScene.addText(f"R={corner_radius:.1f}")
+            if self.is_chamfer_mode():
+                txt_r = self.previewScene.addText(f"C={corner_radius:.1f}")
+            else:
+                txt_r = self.previewScene.addText(f"R={corner_radius:.1f}")
             txt_r.setPos(width - corner_radius - 40, height - corner_radius + 20)
 
         # -------------------------------
@@ -423,59 +513,9 @@ class MainWindow(QMainWindow):
         msp = doc.modelspace()
 
         # ------------------------------
-        #   ПРЯМОУГОЛЬНИК / СКРУГЛЕНИЯ
+        #   ПРЯМОУГОЛЬНИК / СКРУГЛЕНИЯ / ФАСКИ
         # ------------------------------
-        if corner_radius > 0:
-            r = corner_radius
-
-            # Нижняя линия
-            msp.add_line((r, 0), (width - r, 0))
-
-            # Нижняя правая дуга (270–360°)
-            msp.add_arc(
-                center=(width - r, r),
-                radius=r,
-                start_angle=270,
-                end_angle=360
-            )
-
-            # Правая вертикаль
-            msp.add_line((width, r), (width, height - r))
-
-            # Верхняя правая дуга (0–90°)
-            msp.add_arc(
-                center=(width - r, height - r),
-                radius=r,
-                start_angle=0,
-                end_angle=90
-            )
-
-            # Верхняя линия
-            msp.add_line((width - r, height), (r, height))
-
-            # Верхняя левая дуга (90–180°)
-            msp.add_arc(
-                center=(r, height - r),
-                radius=r,
-                start_angle=90,
-                end_angle=180
-            )
-
-            # Левая вертикаль
-            msp.add_line((0, height - r), (0, r))
-
-            # Нижняя левая дуга (180–270°)
-            msp.add_arc(
-                center=(r, r),
-                radius=r,
-                start_angle=180,
-                end_angle=270
-            )
-
-        else:
-            # Обычный прямоугольник
-            pts = [(0, 0), (width, 0), (width, height), (0, height), (0, 0)]
-            msp.add_lwpolyline(pts, close=True)
+        self.add_rectangle_to_dxf(msp, width, height, corner_radius)
 
         # ------------------------------
         #       ОТВЕРСТИЯ
