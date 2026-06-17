@@ -21,13 +21,15 @@ pyinstaller ^
  --onefile ^
  --windowed ^
  --clean ^
+ --name DXF_Rectangle_Creator ^
  --exclude PySide6 ^
  --exclude shiboken6 ^
  --exclude PyQt5 ^
  --collect-all PyQt6 ^
  --collect-all ezdxf ^
  --collect-all numpy ^
- DXF_Rectangle_Creator.py
+ --paths . ^
+ main.py
 
 echo.
 echo =======================================
