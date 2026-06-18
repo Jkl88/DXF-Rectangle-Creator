@@ -645,25 +645,15 @@ class DimGraphicsItem(QGraphicsObject):
         super().mousePressEvent(event)
 
     def _try_flip_side(self, delta) -> bool:
-        if self._is_angled:
+        if self.side not in _OPPOSITE_SIDE:
             return False
         thresh = 0.5
         min_off = 3.0 + thresh
         if self.offset > min_off:
             return False
-        if self.side == "bottom" and delta.y() < -thresh:
-            self.side = _OPPOSITE_SIDE[self.side]
-            self.offset = 3.0
-            return True
-        if self.side == "top" and delta.y() > thresh:
-            self.side = _OPPOSITE_SIDE[self.side]
-            self.offset = 3.0
-            return True
-        if self.side == "right" and delta.x() < -thresh:
-            self.side = _OPPOSITE_SIDE[self.side]
-            self.offset = 3.0
-            return True
-        if self.side == "left" and delta.x() > thresh:
+        _, _, nx, ny = self._dim_vectors()
+        perp = delta.x() * nx + delta.y() * ny
+        if perp < -thresh:
             self.side = _OPPOSITE_SIDE[self.side]
             self.offset = 3.0
             return True

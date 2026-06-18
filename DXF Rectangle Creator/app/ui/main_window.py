@@ -4,11 +4,11 @@ import os
 import re
 import sys
 
-from PyQt6.QtCore import QSettings, QUrl, Qt
-from PyQt6.QtGui import QAction, QDesktopServices, QKeySequence, QUndoStack
+from PyQt6.QtCore import QEvent, QSettings, QUrl, Qt
+from PyQt6.QtGui import QAction, QDesktopServices, QKeyEvent, QKeySequence, QUndoStack
 from PyQt6.QtWidgets import (
-    QButtonGroup, QCheckBox, QFileDialog, QHBoxLayout, QLabel,
-    QMainWindow, QMessageBox, QPushButton, QGraphicsScene,
+    QApplication, QButtonGroup, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPushButton, QGraphicsScene,
     QSplitter, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -22,11 +22,11 @@ from app.editor.view import EditorView
 from app.export.dxf_exporter import export_dxf
 from app.export.dxf_importer import apply_dxf_contour
 from app.export.png_exporter import export_png
-from app.models.base import ContourKind, SelectionKind
+from app.models.base import ContourKind, SelectionKind, ArrayKind
 from app.models.document import Document
 from app.ui.element_tree import ElementTree
 from app.ui.properties_panel import PropertiesPanel
-from app.ui.widgets import FocusSpinBox
+from app.ui.widgets import FocusDoubleSpinBox, FocusSpinBox
 from app.update_checker import check_update
 from app.version import CURRENT_VERSION
 
@@ -111,7 +111,7 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.btnFit)
         toolbar.addWidget(QLabel("Шрифт:"))
         self.spinFont = FocusSpinBox()
-        self.spinFont.setRange(4, 24)
+        self.spinFont.setRange(2, 60)
         self.spinFont.setValue(self.document.default_font_size)
         self.spinFont.valueChanged.connect(self._on_font_changed)
         toolbar.addWidget(self.spinFont)
@@ -134,6 +134,8 @@ class MainWindow(QMainWindow):
             on_aux_line_mode_changed=self._set_aux_line_mode,
             on_rectangle_mode_changed=self._set_rectangle_mode,
             on_origin_placement_done=self._on_origin_placed,
+            on_hole_place_done=self._end_hole_place_mode,
+            on_array_place_done=self._end_array_place_mode,
         )
         self.scene_ctrl = EditorSceneController(
             self.document, self.scene,
@@ -141,6 +143,10 @@ class MainWindow(QMainWindow):
             on_add_shutter=self._add_shutter_from_draw,
             on_add_infinite_line=self._add_infinite_line_from_tool,
             on_add_rectangle=self._add_rectangle_from_draw,
+            on_place_hole=self._on_place_hole,
+            on_place_array=self._on_place_array,
+            on_aux_distance_input=self._on_aux_distance_input,
+            on_rect_size_input=self._on_rect_size_input,
         )
         self.view.set_scene_controller(self.scene_ctrl)
 
@@ -185,6 +191,8 @@ class MainWindow(QMainWindow):
         self.addAction(act_redo)
         self.addAction(act_del)
         self.addAction(act_save)
+
+        QApplication.instance().installEventFilter(self)
 
         self._rebuild_scene()
         self.title_block.refresh()
@@ -260,6 +268,8 @@ class MainWindow(QMainWindow):
             self.scene_ctrl.cancel_shutter()
             self.scene_ctrl.cancel_aux_line()
             self.scene_ctrl.cancel_rectangle()
+            self.scene_ctrl.cancel_hole_place()
+            self.scene_ctrl.cancel_array_place()
             self.scene_ctrl.set_measure_mode(True)
             self.view.setCursor(Qt.CursorShape.CrossCursor)
         else:
@@ -278,6 +288,8 @@ class MainWindow(QMainWindow):
             self.scene_ctrl.cancel_origin_placement()
             self.scene_ctrl.cancel_aux_line()
             self.scene_ctrl.cancel_rectangle()
+            self.scene_ctrl.cancel_hole_place()
+            self.scene_ctrl.cancel_array_place()
             self.scene_ctrl.set_shutter_mode(True)
             self.view.setCursor(Qt.CursorShape.CrossCursor)
         else:
@@ -295,6 +307,8 @@ class MainWindow(QMainWindow):
             self.scene_ctrl.cancel_measure()
             self.scene_ctrl.cancel_shutter()
             self.scene_ctrl.cancel_rectangle()
+            self.scene_ctrl.cancel_hole_place()
+            self.scene_ctrl.cancel_array_place()
             self.scene_ctrl.cancel_origin_placement()
             self.scene_ctrl.set_aux_line_mode(True)
             self.view.setCursor(Qt.CursorShape.CrossCursor)
@@ -313,6 +327,8 @@ class MainWindow(QMainWindow):
             self.scene_ctrl.cancel_measure()
             self.scene_ctrl.cancel_shutter()
             self.scene_ctrl.cancel_aux_line()
+            self.scene_ctrl.cancel_hole_place()
+            self.scene_ctrl.cancel_array_place()
             self.scene_ctrl.cancel_origin_placement()
             self.scene_ctrl.set_rectangle_mode(True)
             self.view.setCursor(Qt.CursorShape.CrossCursor)
@@ -336,6 +352,8 @@ class MainWindow(QMainWindow):
         self.scene_ctrl.cancel_shutter()
         self.scene_ctrl.cancel_aux_line()
         self.scene_ctrl.cancel_rectangle()
+        self.scene_ctrl.cancel_hole_place()
+        self.scene_ctrl.cancel_array_place()
         self._deactivate_tool_buttons()
         self.scene_ctrl.start_origin_placement()
         self.view.setCursor(Qt.CursorShape.CrossCursor)
@@ -495,14 +513,137 @@ class MainWindow(QMainWindow):
     def _rebuild_scene(self):
         return self.scene_ctrl.rebuild()
 
+    def _end_hole_place_mode(self) -> None:
+        self.scene_ctrl.cancel_hole_place()
+        if not self.scene_ctrl.origin_placement_mode:
+            self.view.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _end_array_place_mode(self) -> None:
+        self.scene_ctrl.cancel_array_place()
+        if not self.scene_ctrl.origin_placement_mode:
+            self.view.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _adjust_array_place_count(self, delta: int) -> None:
+        if not self.scene_ctrl.array_place_mode:
+            return
+        self.scene_ctrl.adjust_array_place_count(delta)
+
+    def _adjust_selected_array_count(self, delta: int) -> bool:
+        sel = self.document.selection
+        if sel.kind != SelectionKind.ARRAY:
+            return False
+        arr = self.document.get_array(sel.object_id)
+        if arr is None or arr.kind != ArrayKind.GRID:
+            return False
+        new_count = max(1, min(1000, arr.count_x + delta))
+        if new_count == arr.count_x:
+            return True
+
+        def apply() -> None:
+            a = self.document.get_array(arr.id)
+            if a is not None:
+                a.count_x = new_count
+
+        self._undo_stack.push(PropertyChangeCommand(self.document, apply, "Кол-во X"))
+        return True
+
+    def _array_count_key_delta(self, event: QKeyEvent) -> int:
+        if event.key() in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            return 1
+        if event.key() == Qt.Key.Key_Minus:
+            return -1
+        text = event.text()
+        if text == "+":
+            return 1
+        if text == "-":
+            return -1
+        return 0
+
+    def _editor_input_focused(self) -> bool:
+        fw = QApplication.focusWidget()
+        if fw is None:
+            return False
+        return isinstance(fw, (QLineEdit, QSpinBox, QDoubleSpinBox, FocusSpinBox, FocusDoubleSpinBox))
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            key_event = event
+            if not isinstance(key_event, QKeyEvent):
+                return super().eventFilter(watched, event)
+            if self._editor_input_focused():
+                return super().eventFilter(watched, event)
+            delta = self._array_count_key_delta(key_event)
+            if delta == 0:
+                return super().eventFilter(watched, event)
+            if self.scene_ctrl.array_place_mode:
+                self.scene_ctrl.adjust_array_place_count(delta)
+                return True
+            if self._adjust_selected_array_count(delta):
+                return True
+        return super().eventFilter(watched, event)
+
     def _add_hole(self):
+        self._deactivate_tool_buttons()
+        self.scene_ctrl.cancel_measure()
+        self.scene_ctrl.cancel_shutter()
+        self.scene_ctrl.cancel_aux_line()
+        self.scene_ctrl.cancel_rectangle()
+        self.scene_ctrl.cancel_array_place()
+        color = self.document.next_hole_color()
+        self.scene_ctrl.set_hole_place_mode(True, color)
+        self.view.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _on_place_hole(self, cx: float, cy: float, color: str) -> None:
+        from PyQt6.QtWidgets import QInputDialog
         from app.models.base import Hole
+
+        diameter, ok = QInputDialog.getDouble(
+            self, "Диаметр отверстия", "Диаметр:", 6.0, 0.1, 100000.0, 2,
+        )
+        if not ok:
+            self._end_hole_place_mode()
+            return
         hole = Hole(
-            cx=10.0, cy=10.0, diameter=6.0,
-            color=self.document.next_hole_color(),
+            cx=cx, cy=cy, diameter=diameter,
+            color=color,
             name=f"Отверстие {len(self.document.holes) + 1}",
         )
         self._undo_stack.push(AddHoleCommand(self.document, hole))
+        self._end_hole_place_mode()
+
+    def _on_place_array(self, arr) -> None:
+        self._undo_stack.push(AddArrayCommand(self.document, arr))
+        self._end_array_place_mode()
+
+    def _on_aux_distance_input(
+        self, src: tuple[float, float, float, float],
+        current_offset: float, digits: str,
+    ) -> None:
+        from app.ui.dim_dialogs import ValueInputDialog
+
+        dlg = ValueInputDialog(
+            "Расстояние", "Расстояние:",
+            value=abs(current_offset), minimum=0.0, maximum=100000.0,
+            seed_text=digits or None, parent=self,
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        if self.scene_ctrl.place_aux_at_distance(dlg.value()):
+            self._set_aux_line_mode(False)
+
+    def _on_rect_size_input(self, p1: tuple[float, float], digits: str) -> None:
+        from app.ui.dim_dialogs import TwoSizeDialog
+
+        initial = float(digits) if digits else 50.0
+        dlg = TwoSizeDialog(
+            "Размеры прямоугольника", "Ширина:", "Высота:", initial, initial, self,
+            seed_text_a=digits or None,
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        width, height = dlg.values()
+        if self.scene_ctrl.place_rect_at_sizes(width, height):
+            self._set_rectangle_mode(False)
 
     def _clear_selection(self):
         self.document.select(SelectionKind.NONE)
@@ -583,20 +724,18 @@ class MainWindow(QMainWindow):
                 hole_id = arr.source_hole_id
         if not hole_id:
             return
-        from app.models.base import HoleArray
         hole = self.document.get_hole(hole_id)
         if hole is None:
             return
-        cx, cy = self.document.contour_center()
-        import math
-        n = len(self.document.arrays_for_hole(hole_id)) + 1
-        arr = HoleArray(
-            source_hole_id=hole_id,
-            name=f"Массив {n}",
-            center_x=cx, center_y=cy,
-            radius=math.hypot(hole.cx - cx, hole.cy - cy) or 30.0,
-        )
-        self._undo_stack.push(AddArrayCommand(self.document, arr))
+        self._deactivate_tool_buttons()
+        self.scene_ctrl.cancel_measure()
+        self.scene_ctrl.cancel_shutter()
+        self.scene_ctrl.cancel_aux_line()
+        self.scene_ctrl.cancel_rectangle()
+        self.scene_ctrl.cancel_hole_place()
+        self.scene_ctrl.set_array_place_mode(True, hole_id)
+        self.view.setCursor(Qt.CursorShape.CrossCursor)
+        self.view.setFocus()
 
     def _delete_selected(self):
         if self.document.selection.kind == SelectionKind.NONE:
@@ -622,8 +761,18 @@ class MainWindow(QMainWindow):
 
     @classmethod
     def _default_logo_path(cls) -> str:
-        path = os.path.join(cls._project_root(), "АКОЛЕД.jpg")
-        return path if os.path.isfile(path) else ""
+        logo_name = "\u0410\u041a\u041e\u041b\u0415\u0414.jpg"
+        candidates: list[str] = []
+        if getattr(sys, "frozen", False):
+            meipass = getattr(sys, "_MEIPASS", "")
+            if meipass:
+                candidates.append(os.path.join(meipass, logo_name))
+            candidates.append(os.path.join(os.path.dirname(sys.executable), logo_name))
+        candidates.append(os.path.join(cls._project_root(), logo_name))
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+        return ""
 
     @staticmethod
     def _sanitize_export_name(text: str) -> str:

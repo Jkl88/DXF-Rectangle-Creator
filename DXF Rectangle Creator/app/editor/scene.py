@@ -7,6 +7,7 @@ from PyQt6.QtGui import QBrush, QColor, QFont, QPainterPath, QPen
 from PyQt6.QtWidgets import QApplication, QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene
 
 from app.editor.guides import SnapGuideItem
+from app.editor.placement_preview import ToolPlacementPreview
 from app.editor.infinite_line_items import InfiniteLineGraphicsItem
 from app.editor.rectangle_items import DrawnRectangleGraphicsItem
 from app.editor.shutter_items import ShutterRegionGraphicsItem
@@ -16,7 +17,7 @@ from app.formatting import format_dim
 from app.geometry.slot import (
     polygon_inscribed_radius, slot_center_axes_world,
 )
-from app.models.base import ContourKind, HoleKind, SelectionKind, ArrayKind, MirrorAxis, _transform_point
+from app.models.base import ContourKind, HoleKind, HoleArray, SelectionKind, ArrayKind, MirrorAxis, _transform_point
 from app.models.document import Document
 from app.theme import canvas_colors
 
@@ -28,14 +29,21 @@ SCENE_EXTENT = 200_000.0
 
 class EditorSceneController:
     def __init__(self, document: Document, scene: QGraphicsScene, on_edit_dimension=None,
-                 on_add_shutter=None, on_add_infinite_line=None, on_add_rectangle=None):
+                 on_add_shutter=None, on_add_infinite_line=None, on_add_rectangle=None,
+                 on_place_hole=None, on_place_array=None,
+                 on_aux_distance_input=None, on_rect_size_input=None):
         self.document = document
         self.scene = scene
         self.on_edit_dimension = on_edit_dimension
         self.on_add_shutter = on_add_shutter
         self.on_add_infinite_line = on_add_infinite_line
         self.on_add_rectangle = on_add_rectangle
+        self.on_place_hole = on_place_hole
+        self.on_place_array = on_place_array
+        self.on_aux_distance_input = on_aux_distance_input
+        self.on_rect_size_input = on_rect_size_input
         self.colors = canvas_colors()
+        self._placement_preview = ToolPlacementPreview(scene)
         self._lane_counters: dict[str, int] = {}
         self._built_offsets: dict[str, list[float]] = {}
         self._drag_dim_refs: dict[str, float] = {}
@@ -54,7 +62,17 @@ class EditorSceneController:
         self.shutter_mode = False
         self.aux_line_mode = False
         self.rectangle_mode = False
+        self.hole_place_mode = False
+        self.array_place_mode = False
+        self._hole_place_cursor: tuple[float, float] | None = None
+        self._hole_place_color = "#e03131"
+        self._array_place_hole_id = ""
+        self._array_place_count = 2
+        self._array_place_cursor: tuple[float, float] | None = None
+        self._aux_offset_sign = 1.0
+        self._rect_place_cursor: tuple[float, float] | None = None
         self._aux_src: tuple[float, float, float, float] | None = None
+        self._aux_current_offset = 0.0
         self._aux_pick_seg = None
         self._aux_preview: QGraphicsPathItem | None = None
         self._shutter_draw_p1: tuple[float, float] | None = None
@@ -71,6 +89,7 @@ class EditorSceneController:
 
     def rebuild(self) -> QRectF:
         self.scene.clear()
+        self._placement_preview.on_scene_cleared()
         self._measure_marker_p1 = None
         self._measure_marker_cursor = None
         self._measure_preview_leader = None
@@ -160,6 +179,19 @@ class EditorSceneController:
         self._content_rect = rect
         if self.measure_mode:
             self._sync_measure_markers()
+        if self.hole_place_mode and self._hole_place_cursor:
+            cx, cy = self._hole_place_cursor
+            self._placement_preview.show_hole(
+                self.document, cx, cy, 6.0, self._hole_place_color,
+            )
+        elif self.array_place_mode and self._array_place_cursor:
+            self._refresh_array_place_preview()
+        elif self.rectangle_mode and self._rect_draw_p1 and self._rect_place_cursor:
+            p1 = self._rect_draw_p1
+            cx, cy = self._rect_place_cursor
+            left, right = sorted((p1[0], cx))
+            top, bottom = sorted((p1[1], cy))
+            self._placement_preview.show_rect(left, top, right, bottom)
         return rect
 
     def _on_select(self, kind: str, obj_id: str, notify: bool = True):
@@ -685,6 +717,14 @@ class EditorSceneController:
             return (cx, cy), _transform_point(cx + arr.step_x, cy, cx, cy, arr.grid_angle)
         return (cx, cy), _transform_point(cx, cy + arr.step_y, cx, cy, arr.grid_angle)
 
+    def _grid_span_endpoints(self, hole, arr, axis: str) -> tuple[tuple[float, float], tuple[float, float]]:
+        cx, cy = hole.cx, hole.cy
+        if axis == "h":
+            n = max(0, arr.count_x - 1)
+            return (cx, cy), _transform_point(cx + n * arr.step_x, cy, cx, cy, arr.grid_angle)
+        n = max(0, arr.count_y - 1)
+        return (cx, cy), _transform_point(cx, cy + n * arr.step_y, cx, cy, arr.grid_angle)
+
     def _collect_dim_snap_targets(self, exclude_id: str, orientation: str) -> list[float]:
         """Collect shelf positions (line_pos) for snap alignment."""
         targets: list[float] = []
@@ -823,6 +863,15 @@ class EditorSceneController:
                     format_dim(arr.step_x),
                     pt1=gp1, pt2=gp2,
                 )
+                glx_id = f"{arr.id}_glx"
+                sp1, sp2 = self._grid_span_endpoints(hole, arr, "h")
+                span_x = self.document.grid_array_span_x(arr)
+                self._update_dim_live(
+                    glx_id, "array", arr.id, hole.cx, hole.cx + span_x,
+                    self._frozen_dim_ref(glx_id, hole.cy),
+                    format_dim(span_x),
+                    pt1=sp1, pt2=sp2,
+                )
             if arr.kind == ArrayKind.GRID and arr.count_y > 1:
                 gv_id = f"{arr.id}_gv"
                 gp1, gp2 = self._grid_step_endpoints(hole, arr, "v")
@@ -831,6 +880,15 @@ class EditorSceneController:
                     self._frozen_dim_ref(gv_id, hole.cx),
                     format_dim(arr.step_y),
                     pt1=gp1, pt2=gp2,
+                )
+                gly_id = f"{arr.id}_gly"
+                sp1, sp2 = self._grid_span_endpoints(hole, arr, "v")
+                span_y = self.document.grid_array_span_y(arr)
+                self._update_dim_live(
+                    gly_id, "array", arr.id, hole.cy, hole.cy + span_y,
+                    self._frozen_dim_ref(gly_id, hole.cx),
+                    format_dim(span_y),
+                    pt1=sp1, pt2=sp2,
                 )
             if arr.kind == ArrayKind.CIRCULAR:
                 self._sync_circular_array_dims(arr.id)
@@ -1118,6 +1176,8 @@ class EditorSceneController:
         self.document.select(SelectionKind.ORIGIN, notify=notify)
 
     def start_origin_placement(self) -> None:
+        self.cancel_hole_place()
+        self.cancel_array_place()
         self.origin_placement_mode = True
         for item in list(self.scene.items()):
             if isinstance(item, OriginHandle):
@@ -1295,6 +1355,15 @@ class EditorSceneController:
                     format_dim(arr.step_x), color, "array", arr.id,
                     pt1=gp1, pt2=gp2,
                 )
+                glx_id = f"{arr.id}_glx"
+                sp1, sp2 = self._grid_span_endpoints(hole, arr, "h")
+                span_x = doc.grid_array_span_x(arr)
+                self._add_dim(
+                    glx_id, "bottom", hole.cx, hole.cx + span_x,
+                    self._hole_dim_ref(glx_id, hole.cy),
+                    format_dim(span_x), color, "array", arr.id,
+                    pt1=sp1, pt2=sp2,
+                )
             if arr.kind == ArrayKind.GRID and arr.count_y > 1:
                 gv_id = f"{arr.id}_gv"
                 gp1, gp2 = self._grid_step_endpoints(hole, arr, "v")
@@ -1303,6 +1372,15 @@ class EditorSceneController:
                     self._hole_dim_ref(gv_id, hole.cx),
                     format_dim(arr.step_y), color, "array", arr.id,
                     pt1=gp1, pt2=gp2,
+                )
+                gly_id = f"{arr.id}_gly"
+                sp1, sp2 = self._grid_span_endpoints(hole, arr, "v")
+                span_y = doc.grid_array_span_y(arr)
+                self._add_dim(
+                    gly_id, "right", hole.cy, hole.cy + span_y,
+                    self._hole_dim_ref(gly_id, hole.cx),
+                    format_dim(span_y), color, "array", arr.id,
+                    pt1=sp1, pt2=sp2,
                 )
 
     def _build_hole_slot_guides(self, hole) -> None:
@@ -1518,6 +1596,10 @@ class EditorSceneController:
             return "right"
         if dim_id.endswith("_d") and self.document.get_measure(dim_id[:-2]) is not None:
             return "bottom"
+        if dim_id.endswith("_glx"):
+            return "bottom"
+        if dim_id.endswith("_gly"):
+            return "right"
         if dim_id.endswith("_ox") or dim_id.endswith("_gh") or dim_id.endswith("_cx"):
             return "top"
         if dim_id.endswith("_left") or dim_id.endswith("_top"):
@@ -1639,6 +1721,8 @@ class EditorSceneController:
             self.cancel_shutter()
             self.cancel_aux_line()
             self.cancel_rectangle()
+            self.cancel_hole_place()
+            self.cancel_array_place()
         if not active:
             self.measure_p1 = None
             self.measure_pending_kind = "linear"
@@ -1986,6 +2070,8 @@ class EditorSceneController:
         if active:
             self.cancel_aux_line()
             self.cancel_rectangle()
+            self.cancel_hole_place()
+            self.cancel_array_place()
         if not active:
             self._shutter_draw_p1 = None
             self._clear_shutter_preview()
@@ -2096,6 +2182,209 @@ class EditorSceneController:
             self.scene.removeItem(self._aux_preview)
             self._aux_preview = None
 
+    # --- interactive hole placement ---
+
+    def set_hole_place_mode(self, active: bool, color: str = "#e03131") -> None:
+        self.hole_place_mode = active
+        self._hole_place_color = color
+        if active:
+            self.cancel_measure()
+            self.cancel_shutter()
+            self.cancel_aux_line()
+            self.cancel_rectangle()
+            self.cancel_array_place()
+            self.origin_placement_mode = False
+        else:
+            self._hole_place_cursor = None
+            self._placement_preview.clear()
+            self._guide_item.clear()
+
+    def cancel_hole_place(self) -> None:
+        self.set_hole_place_mode(False)
+
+    def update_hole_place_cursor(self, x: float, y: float) -> None:
+        if not self.hole_place_mode:
+            return
+        sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
+        self._hole_place_cursor = (sx, sy)
+        self._placement_preview.show_hole(
+            self.document, sx, sy, 6.0, self._hole_place_color,
+        )
+
+    def click_hole_place(self, x: float, y: float) -> bool:
+        if not self.hole_place_mode:
+            return False
+        sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
+        self._hole_place_cursor = (sx, sy)
+        if self.on_place_hole:
+            self.on_place_hole(sx, sy, self._hole_place_color)
+        else:
+            self.cancel_hole_place()
+        return True
+
+    # --- interactive array placement ---
+
+    def set_array_place_mode(self, active: bool, hole_id: str = "") -> None:
+        self.array_place_mode = active
+        self._array_place_hole_id = hole_id
+        self._array_place_count = 2
+        if active:
+            self.cancel_measure()
+            self.cancel_shutter()
+            self.cancel_aux_line()
+            self.cancel_rectangle()
+            self.cancel_hole_place()
+            self.origin_placement_mode = False
+            hole = self.document.get_hole(hole_id)
+            if hole is not None:
+                self._array_place_cursor = (hole.cx + 20.0, hole.cy)
+                self._refresh_array_place_preview()
+        else:
+            self._array_place_cursor = None
+            self._placement_preview.clear()
+            self._guide_item.clear()
+
+    def cancel_array_place(self) -> None:
+        self.set_array_place_mode(False)
+
+    def _array_preview_positions(
+        self, sx: float, sy: float,
+    ) -> list[tuple[float, float]]:
+        hole = self.document.get_hole(self._array_place_hole_id)
+        if hole is None:
+            return []
+        count_x = self._array_place_count
+        count_y = 1
+        if count_x <= 1:
+            return [(hole.cx, hole.cy)]
+        step_x = (sx - hole.cx) / (count_x - 1)
+        step_y = 0.0
+        positions: list[tuple[float, float]] = []
+        for iy in range(count_y):
+            for ix in range(count_x):
+                cx, cy = _transform_point(
+                    hole.cx + ix * step_x, hole.cy + iy * step_y,
+                    hole.cx, hole.cy, 0.0,
+                )
+                positions.append((cx, cy))
+        return positions
+
+    def _refresh_array_place_preview(self) -> None:
+        if not self.array_place_mode or self._array_place_cursor is None:
+            return
+        hole = self.document.get_hole(self._array_place_hole_id)
+        if hole is None:
+            return
+        sx, sy = self._array_place_cursor
+        positions = self._array_preview_positions(sx, sy)
+        self._placement_preview.show_array_grid(
+            positions, hole.diameter, hole.color,
+        )
+
+    def update_array_place_cursor(self, x: float, y: float) -> None:
+        if not self.array_place_mode:
+            return
+        sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
+        self._array_place_cursor = (sx, sy)
+        self._refresh_array_place_preview()
+
+    def adjust_array_place_count(self, delta: int) -> None:
+        if not self.array_place_mode:
+            return
+        if self._array_place_cursor is None:
+            hole = self.document.get_hole(self._array_place_hole_id)
+            if hole is not None:
+                self._array_place_cursor = (hole.cx + 20.0, hole.cy)
+        self._array_place_count = max(2, min(100, self._array_place_count + delta))
+        self._refresh_array_place_preview()
+
+    def click_array_place(self, x: float, y: float) -> bool:
+        if not self.array_place_mode:
+            return False
+        hole = self.document.get_hole(self._array_place_hole_id)
+        if hole is None:
+            self.cancel_array_place()
+            return False
+        sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
+        count_x = self._array_place_count
+        step_x = 20.0 if count_x <= 1 else (sx - hole.cx) / (count_x - 1)
+        n = len(self.document.arrays_for_hole(hole.id)) + 1
+        arr = HoleArray(
+            source_hole_id=hole.id,
+            name=f"Массив {n}",
+            kind=ArrayKind.GRID,
+            count_x=count_x,
+            count_y=1,
+            step_x=step_x,
+            step_y=20.0,
+            grid_angle=0.0,
+        )
+        if self.on_place_array:
+            self.on_place_array(arr)
+        else:
+            self.cancel_array_place()
+        return True
+
+    def can_accept_tool_digits(self) -> bool:
+        return bool(
+            (self.aux_line_mode and self._aux_src is not None)
+            or (self.rectangle_mode and self._rect_draw_p1 is not None)
+        )
+
+    def handle_tool_digit_input(self, digits: str) -> bool:
+        if self.aux_line_mode and self._aux_src is not None and self.on_aux_distance_input:
+            self.on_aux_distance_input(
+                self._aux_src, self._aux_current_offset, digits,
+            )
+            return True
+        if self.rectangle_mode and self._rect_draw_p1 is not None and self.on_rect_size_input:
+            self.on_rect_size_input(self._rect_draw_p1, digits)
+            return True
+        return False
+
+    def place_aux_at_distance(self, distance: float) -> bool:
+        if not self.aux_line_mode or self._aux_src is None:
+            return False
+        offset = self._aux_offset_sign * abs(distance)
+        from app.geometry.infinite_line_bind import segment_to_source_anchor
+        from app.geometry.line_math import parallel_segment, segment_midpoint
+        px1, py1, px2, py2 = parallel_segment(*self._aux_src, offset)
+        mx, my = segment_midpoint(px1, py1, px2, py2)
+        anchor = segment_to_source_anchor(
+            self._aux_pick_seg, mx, my, self.document,
+        ) if self._aux_pick_seg else None
+        if self.on_add_infinite_line:
+            self.on_add_infinite_line(*self._aux_src, offset, anchor)
+        else:
+            self.document.add_infinite_line(*self._aux_src, offset, source_anchor=anchor)
+        self._aux_src = None
+        self._aux_pick_seg = None
+        self._aux_current_offset = 0.0
+        self._clear_aux_preview()
+        self._placement_preview.clear_dims()
+        self.aux_line_mode = False
+        self._guide_item.clear()
+        return True
+
+    def place_rect_at_sizes(self, width: float, height: float) -> bool:
+        if not self.rectangle_mode or self._rect_draw_p1 is None:
+            return False
+        p1 = self._rect_draw_p1
+        self._rect_draw_p1 = None
+        self._rect_place_cursor = None
+        self._clear_rect_preview()
+        self._placement_preview.clear()
+        self._guide_item.clear()
+        w = max(width, 1.0)
+        h = max(height, 1.0)
+        cx, cy = p1[0] + w / 2, p1[1] + h / 2
+        if self.on_add_rectangle:
+            self.on_add_rectangle(cx, cy, w, h)
+        else:
+            self.document.add_drawn_rect(cx, cy, w, h)
+        self.rectangle_mode = False
+        return True
+
     def _update_aux_preview(self, offset: float) -> None:
         if self._aux_src is None:
             return
@@ -2117,6 +2406,7 @@ class EditorSceneController:
         path.moveTo(clipped[0], clipped[1])
         path.lineTo(clipped[2], clipped[3])
         self._aux_preview.setPath(path)
+        self._placement_preview.show_aux_distance(self._aux_src, offset)
 
     def set_aux_line_mode(self, active: bool) -> None:
         self.aux_line_mode = active
@@ -2124,11 +2414,15 @@ class EditorSceneController:
             self.cancel_measure()
             self.cancel_shutter()
             self.cancel_rectangle()
+            self.cancel_hole_place()
+            self.cancel_array_place()
             self.origin_placement_mode = False
         if not active:
             self._aux_src = None
             self._aux_pick_seg = None
+            self._aux_current_offset = 0.0
             self._clear_aux_preview()
+            self._placement_preview.clear_dims()
 
     def cancel_aux_line(self) -> None:
         self.set_aux_line_mode(False)
@@ -2170,6 +2464,8 @@ class EditorSceneController:
             return
         from app.geometry.line_math import signed_offset_to_line
         offset = signed_offset_to_line(x, y, *self._aux_src)
+        self._aux_current_offset = offset
+        self._aux_offset_sign = 1.0 if offset >= 0 else -1.0
         self._update_aux_preview(offset)
 
     # --- drawn rectangle tool ---
@@ -2236,10 +2532,14 @@ class EditorSceneController:
             self.cancel_measure()
             self.cancel_shutter()
             self.cancel_aux_line()
+            self.cancel_hole_place()
+            self.cancel_array_place()
             self.origin_placement_mode = False
         if not active:
             self._rect_draw_p1 = None
+            self._rect_place_cursor = None
             self._clear_rect_preview()
+            self._placement_preview.clear()
 
     def cancel_rectangle(self) -> None:
         self.set_rectangle_mode(False)
@@ -2275,14 +2575,18 @@ class EditorSceneController:
             return
         sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
         self._rect_draw_p1 = (sx, sy)
-        self._update_rect_preview(sx, sy, sx, sy)
+        self._rect_place_cursor = (sx, sy)
+        self._placement_preview.show_rect(sx, sy, sx + 1.0, sy + 1.0)
 
     def rectangle_move(self, x: float, y: float) -> None:
         if not self.rectangle_mode or self._rect_draw_p1 is None:
             return
         sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
         p1 = self._rect_draw_p1
-        self._update_rect_preview(p1[0], p1[1], sx, sy)
+        self._rect_place_cursor = (sx, sy)
+        left, right = sorted((p1[0], sx))
+        top, bottom = sorted((p1[1], sy))
+        self._placement_preview.show_rect(left, top, right, bottom)
 
     def rectangle_release(self, x: float, y: float) -> bool:
         if not self.rectangle_mode or self._rect_draw_p1 is None:
@@ -2290,7 +2594,9 @@ class EditorSceneController:
         sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
         p1 = self._rect_draw_p1
         self._rect_draw_p1 = None
+        self._rect_place_cursor = None
         self._clear_rect_preview()
+        self._placement_preview.clear()
         self._guide_item.clear()
         left, right = sorted((p1[0], sx))
         top, bottom = sorted((p1[1], sy))

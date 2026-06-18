@@ -91,11 +91,13 @@ def _add_hole(msp, rh, *, height: float, y_negate: bool):
         msp.add_lwpolyline(pts, close=True)
 
 
-def _add_shutter_slats(msp, shutter, *, height: float, y_negate: bool) -> None:
+def _add_shutter_slats(
+    msp, shutter, *, height: float, y_negate: bool, layout,
+) -> None:
     xy = lambda x, y: _editor_to_dxf_xy(x, y, height=height, y_negate=y_negate)
     for corners in thin_slats_for_export(
         shutter.cx, shutter.cy, shutter.width, shutter.height,
-        shutter.angle, document.shutter_layout,
+        shutter.angle, layout,
     ):
         pts = [xy(x, y) for x, y in corners]
         if pts and pts[0] != pts[-1]:
@@ -140,7 +142,10 @@ def export_dxf(document: Document, file_path: str) -> None:
         _add_hole(msp, rh, height=height, y_negate=y_negate)
 
     for shutter in document.shutters:
-        _add_shutter_slats(msp, shutter, height=height, y_negate=y_negate)
+        _add_shutter_slats(
+            msp, shutter, height=height, y_negate=y_negate,
+            layout=document.shutter_layout,
+        )
 
     for rect in document.drawn_rects:
         _add_drawn_rectangle(msp, rect, height=height, y_negate=y_negate)

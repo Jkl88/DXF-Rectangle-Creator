@@ -52,8 +52,10 @@ def dim_constrained_targets(doc: Document, dim_id: str) -> list[tuple[str, str, 
         return [("contour", "", -1)]
     if dim_id.endswith("_ox") or dim_id.endswith("_oy"):
         return [("hole", dim_id[:-3], 0)]
-    if dim_id.endswith("_gh") or dim_id.endswith("_gv"):
-        arr = doc.get_array(dim_id[:-3])
+    if dim_id.endswith("_gh") or dim_id.endswith("_gv") or dim_id.endswith("_glx") or dim_id.endswith("_gly"):
+        suffix = dim_id[-4:] if dim_id.endswith(("_glx", "_gly")) else dim_id[-3:]
+        arr_id = dim_id[:-len(suffix)]
+        arr = doc.get_array(arr_id)
         if arr is None:
             return []
         targets: list[tuple[str, str, int]] = [("array", arr.id, -1)]

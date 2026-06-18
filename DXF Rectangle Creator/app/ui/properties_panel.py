@@ -608,27 +608,56 @@ class PropertiesPanel(QScrollArea):
         form.addRow("Тип:", kind)
         self._add_show_dims_row(form, "array", arr_id)
         if arr.kind == ArrayKind.GRID:
+            doc = self.document
             for label, attr, is_int in [
                 ("Кол-во X:", "count_x", True), ("Кол-во Y:", "count_y", True),
-                ("Шаг X:", "step_x", False), ("Шаг Y:", "step_y", False),
-                ("Угол:", "grid_angle", False),
             ]:
-                if is_int:
-                    sp = self._spin_i(
-                        getattr(arr, attr), 1, 1000,
-                        on_apply=lambda v, a=attr: self._set_attr(
-                            lambda: self.document.get_array(arr_id), a, v,
-                        ),
-                    )
-                else:
-                    sp = self._spin_f(
-                        getattr(arr, attr), -10000, 10000, 2 if attr != "grid_angle" else 1,
-                        " мм" if attr != "grid_angle" else "°",
-                        on_apply=lambda v, a=attr: self._set_attr(
-                            lambda: self.document.get_array(arr_id), a, v,
-                        ),
-                    )
+                sp = self._spin_i(
+                    getattr(arr, attr), 1, 1000,
+                    on_apply=lambda v, a=attr: self._set_attr(
+                        lambda: self.document.get_array(arr_id), a, v,
+                    ),
+                )
                 form.addRow(label, sp)
+            span_x = doc.grid_array_span_x(arr)
+            span_y = doc.grid_array_span_y(arr)
+            sp_sx = self._spin_f(
+                arr.step_x, -100000, 100000, 2,
+                on_apply=lambda v: self._chg(
+                    lambda: doc.set_grid_array_step_x(doc.get_array(arr_id), v),
+                ),
+            )
+            sp_sy = self._spin_f(
+                arr.step_y, -100000, 100000, 2,
+                on_apply=lambda v: self._chg(
+                    lambda: doc.set_grid_array_step_y(doc.get_array(arr_id), v),
+                ),
+            )
+            sp_lx = self._spin_f(
+                span_x, 0, 100000, 2,
+                on_apply=lambda v: self._chg(
+                    lambda: doc.set_grid_array_span_x(doc.get_array(arr_id), v),
+                ),
+            )
+            sp_lx.setEnabled(arr.count_x > 1)
+            sp_ly = self._spin_f(
+                span_y, 0, 100000, 2,
+                on_apply=lambda v: self._chg(
+                    lambda: doc.set_grid_array_span_y(doc.get_array(arr_id), v),
+                ),
+            )
+            sp_ly.setEnabled(arr.count_y > 1)
+            form.addRow("Шаг X:", sp_sx)
+            form.addRow("Длина X:", sp_lx)
+            form.addRow("Шаг Y:", sp_sy)
+            form.addRow("Длина Y:", sp_ly)
+            sp_ang = self._spin_f(
+                arr.grid_angle, -10000, 10000, 1, "°",
+                on_apply=lambda v: self._set_attr(
+                    lambda: self.document.get_array(arr_id), "grid_angle", v,
+                ),
+            )
+            form.addRow("Угол:", sp_ang)
         elif arr.kind == ArrayKind.MIRROR:
             axis = QComboBox()
             axis.addItems(["Горизонталь", "Вертикаль"])
@@ -805,7 +834,7 @@ class PropertiesPanel(QScrollArea):
                 lambda v: self._set_attr(lambda: doc.get_leader_state(dim_id), "always_show", v),
             )
             sp_f = FocusSpinBox()
-            sp_f.setRange(4, 24)
+            sp_f.setRange(2, 60)
             sp_f.setValue(st.font_size)
             sp_f.valueChanged.connect(
                 lambda v, d=dim_id: self._set_font_size(d, True, v),
@@ -835,7 +864,7 @@ class PropertiesPanel(QScrollArea):
                 lambda v: self._set_attr(lambda: doc.get_dim_state(dim_id), "always_show", v),
             )
             sp_f = FocusSpinBox()
-            sp_f.setRange(4, 24)
+            sp_f.setRange(2, 60)
             sp_f.setValue(st.font_size)
             sp_f.valueChanged.connect(
                 lambda v, d=dim_id: self._set_font_size(d, False, v),

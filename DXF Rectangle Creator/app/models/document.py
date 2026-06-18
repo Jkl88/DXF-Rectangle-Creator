@@ -403,10 +403,49 @@ class Document:
             arr.step_x = lx / ix
         if iy != 0:
             arr.step_y = ly / iy
+        self._clear_hole_instance_overrides(hole_id)
+
+    def _clear_hole_instance_overrides(self, hole_id: str) -> None:
         prefix = f"{hole_id}:"
         self.instance_overrides = {
             k: v for k, v in self.instance_overrides.items() if not k.startswith(prefix)
         }
+
+    @staticmethod
+    def grid_array_span_x(arr: HoleArray) -> float:
+        if arr.count_x <= 1:
+            return 0.0
+        return arr.step_x * (arr.count_x - 1)
+
+    @staticmethod
+    def grid_array_span_y(arr: HoleArray) -> float:
+        if arr.count_y <= 1:
+            return 0.0
+        return arr.step_y * (arr.count_y - 1)
+
+    def set_grid_array_span_x(self, arr: HoleArray, span: float) -> None:
+        if arr is None or arr.count_x <= 1:
+            return
+        arr.step_x = max(0.0, span) / (arr.count_x - 1)
+        self._clear_hole_instance_overrides(arr.source_hole_id)
+
+    def set_grid_array_span_y(self, arr: HoleArray, span: float) -> None:
+        if arr is None or arr.count_y <= 1:
+            return
+        arr.step_y = max(0.0, span) / (arr.count_y - 1)
+        self._clear_hole_instance_overrides(arr.source_hole_id)
+
+    def set_grid_array_step_x(self, arr: HoleArray, step: float) -> None:
+        if arr is None:
+            return
+        arr.step_x = step
+        self._clear_hole_instance_overrides(arr.source_hole_id)
+
+    def set_grid_array_step_y(self, arr: HoleArray, step: float) -> None:
+        if arr is None:
+            return
+        arr.step_y = step
+        self._clear_hole_instance_overrides(arr.source_hole_id)
 
     def move_mirror_instance(self, hole_id: str, index: int, x: float, y: float) -> None:
         if self.is_movement_blocked(SelectionKind.HOLE, hole_id, index):
@@ -476,8 +515,10 @@ class Document:
         if arr.kind == ArrayKind.GRID:
             if arr.count_x > 1:
                 ids.append(f"{array_id}_gh")
+                ids.append(f"{array_id}_glx")
             if arr.count_y > 1:
                 ids.append(f"{array_id}_gv")
+                ids.append(f"{array_id}_gly")
         elif arr.kind == ArrayKind.CIRCULAR:
             ids.extend([f"{array_id}_cx", f"{array_id}_cy"])
         return ids
@@ -694,6 +735,16 @@ class Document:
             if arr and arr.kind == ArrayKind.GRID:
                 return arr.step_y
             return None
+        if dim_id.endswith("_glx"):
+            arr = self.get_array(dim_id[:-4])
+            if arr and arr.kind == ArrayKind.GRID:
+                return self.grid_array_span_x(arr)
+            return None
+        if dim_id.endswith("_gly"):
+            arr = self.get_array(dim_id[:-4])
+            if arr and arr.kind == ArrayKind.GRID:
+                return self.grid_array_span_y(arr)
+            return None
         if dim_id.endswith("_cx"):
             arr = self.get_array(dim_id[:-3])
             if arr is None:
@@ -853,13 +904,25 @@ class Document:
         if dim_id.endswith("_gh"):
             arr = self.get_array(dim_id[:-3])
             if arr and arr.kind == ArrayKind.GRID:
-                arr.step_x = value
+                self.set_grid_array_step_x(arr, value)
                 return True
             return False
         if dim_id.endswith("_gv"):
             arr = self.get_array(dim_id[:-3])
             if arr and arr.kind == ArrayKind.GRID:
-                arr.step_y = value
+                self.set_grid_array_step_y(arr, value)
+                return True
+            return False
+        if dim_id.endswith("_glx"):
+            arr = self.get_array(dim_id[:-4])
+            if arr and arr.kind == ArrayKind.GRID:
+                self.set_grid_array_span_x(arr, value)
+                return True
+            return False
+        if dim_id.endswith("_gly"):
+            arr = self.get_array(dim_id[:-4])
+            if arr and arr.kind == ArrayKind.GRID:
+                self.set_grid_array_span_y(arr, value)
                 return True
             return False
         if dim_id.endswith("_cx"):

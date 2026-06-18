@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtCore import QPointF, Qt, QTimer
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QApplication, QGraphicsView, QLineEdit, QSpinBox, QDoubleSpinBox
 
@@ -13,7 +13,8 @@ class EditorView(QGraphicsView):
     def __init__(self, scene, on_user_view=None, on_clear_selection=None, on_nudge=None,
                  on_space=None, on_measure_mode_changed=None, on_shutter_mode_changed=None,
                  on_aux_line_mode_changed=None, on_rectangle_mode_changed=None,
-                 on_origin_placement_done=None, parent=None):
+                 on_origin_placement_done=None, on_hole_place_done=None,
+                 on_array_place_done=None, parent=None):
         super().__init__(scene, parent)
         self._on_user_view = on_user_view
         self._on_clear_selection = on_clear_selection
@@ -24,6 +25,8 @@ class EditorView(QGraphicsView):
         self._on_aux_line_mode_changed = on_aux_line_mode_changed
         self._on_rectangle_mode_changed = on_rectangle_mode_changed
         self._on_origin_placement_done = on_origin_placement_done
+        self._on_hole_place_done = on_hole_place_done
+        self._on_array_place_done = on_array_place_done
         self._scene_ctrl = None
         self._panning = False
         self._rmb_pan = False
@@ -31,6 +34,11 @@ class EditorView(QGraphicsView):
         self._left_press_pos = None
         self._shutter_drawing = False
         self._rectangle_drawing = False
+        self._tool_digit_buffer = ""
+        self._tool_digit_timer = QTimer(self)
+        self._tool_digit_timer.setSingleShot(True)
+        self._tool_digit_timer.setInterval(450)
+        self._tool_digit_timer.timeout.connect(self._flush_tool_digit_buffer)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
@@ -41,6 +49,17 @@ class EditorView(QGraphicsView):
 
     def set_scene_controller(self, ctrl) -> None:
         self._scene_ctrl = ctrl
+
+    def _flush_tool_digit_buffer(self) -> None:
+        if not self._tool_digit_buffer or self._scene_ctrl is None:
+            return
+        digits = self._tool_digit_buffer
+        self._tool_digit_buffer = ""
+        self._scene_ctrl.handle_tool_digit_input(digits)
+
+    def _cancel_tool_digit_buffer(self) -> None:
+        self._tool_digit_buffer = ""
+        self._tool_digit_timer.stop()
 
     def _notify(self):
         if self._on_user_view:
@@ -84,6 +103,13 @@ class EditorView(QGraphicsView):
         self._notify()
         event.accept()
 
+    def _tool_mode_active(self, ctrl) -> bool:
+        return bool(ctrl and (
+            ctrl.measure_mode or ctrl.shutter_mode or ctrl.aux_line_mode
+            or ctrl.rectangle_mode or ctrl.origin_placement_mode
+            or ctrl.hole_place_mode or ctrl.array_place_mode
+        ))
+
     def mousePressEvent(self, event):
         ctrl = self._scene_ctrl
         if (
@@ -95,6 +121,24 @@ class EditorView(QGraphicsView):
             done, px, py = ctrl.click_origin_point(sx, sy)
             if done and self._on_origin_placement_done:
                 self._on_origin_placement_done(px, py)
+            event.accept()
+            return
+        if (
+            ctrl is not None and ctrl.hole_place_mode
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            x, y = self._map_to_scene(event.position())
+            ctrl.click_hole_place(x, y)
+            event.accept()
+            return
+        if (
+            ctrl is not None and ctrl.array_place_mode
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            x, y = self._map_to_scene(event.position())
+            done = ctrl.click_array_place(x, y)
+            if done and self._on_array_place_done:
+                self._on_array_place_done()
             event.accept()
             return
         if (
@@ -147,10 +191,7 @@ class EditorView(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton and item is None:
             ctrl = self._scene_ctrl
-            if not (ctrl and (
-                ctrl.measure_mode or ctrl.shutter_mode or ctrl.aux_line_mode
-                or ctrl.rectangle_mode or ctrl.origin_placement_mode
-            )):
+            if not self._tool_mode_active(ctrl):
                 self._left_press_pos = event.position()
                 self._pan_start = event.position()
                 self._panning = False
@@ -175,6 +216,16 @@ class EditorView(QGraphicsView):
             x, y = self._map_to_scene(event.position())
             sx, sy, _ = ctrl.snap_origin_point(x, y, self._view_scale())
             ctrl.update_origin_placement_cursor(sx, sy)
+            event.accept()
+            return
+        if ctrl is not None and ctrl.hole_place_mode:
+            x, y = self._map_to_scene(event.position())
+            ctrl.update_hole_place_cursor(x, y)
+            event.accept()
+            return
+        if ctrl is not None and ctrl.array_place_mode:
+            x, y = self._map_to_scene(event.position())
+            ctrl.update_array_place_cursor(x, y)
             event.accept()
             return
         if ctrl is not None and ctrl.aux_line_mode and self._aux_line_has_src(ctrl):
@@ -237,10 +288,7 @@ class EditorView(QGraphicsView):
         if self._left_press_pos is not None and event.button() == Qt.MouseButton.LeftButton:
             if not self._panning and self._on_clear_selection:
                 ctrl = self._scene_ctrl
-                if not (ctrl and (
-                ctrl.measure_mode or ctrl.shutter_mode or ctrl.aux_line_mode
-                or ctrl.rectangle_mode or ctrl.origin_placement_mode
-            )):
+                if not self._tool_mode_active(ctrl):
                     self._on_clear_selection()
             self._left_press_pos = None
             self._panning = False
@@ -258,13 +306,28 @@ class EditorView(QGraphicsView):
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Escape and self._scene_ctrl:
+            if self._scene_ctrl.hole_place_mode:
+                self._cancel_tool_digit_buffer()
+                self._scene_ctrl.cancel_hole_place()
+                if self._on_hole_place_done:
+                    self._on_hole_place_done()
+                event.accept()
+                return
+            if self._scene_ctrl.array_place_mode:
+                self._scene_ctrl.cancel_array_place()
+                if self._on_array_place_done:
+                    self._on_array_place_done()
+                event.accept()
+                return
             if self._scene_ctrl.aux_line_mode:
+                self._cancel_tool_digit_buffer()
                 self._scene_ctrl.cancel_aux_line()
                 if self._on_aux_line_mode_changed:
                     self._on_aux_line_mode_changed(False)
                 event.accept()
                 return
             if self._scene_ctrl.rectangle_mode:
+                self._cancel_tool_digit_buffer()
                 self._scene_ctrl.cancel_rectangle()
                 self._rectangle_drawing = False
                 if self._on_rectangle_mode_changed:
@@ -300,6 +363,40 @@ class EditorView(QGraphicsView):
             super().keyPressEvent(event)
             return
         key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._tool_digit_buffer:
+            self._tool_digit_timer.stop()
+            self._flush_tool_digit_buffer()
+            event.accept()
+            return
+        if self._scene_ctrl is not None:
+            text = event.text()
+            if text and text[0].isdigit() and self._scene_ctrl.can_accept_tool_digits():
+                self._tool_digit_buffer += text[0]
+                self._tool_digit_timer.start()
+                event.accept()
+                return
+            if self._scene_ctrl.array_place_mode and text in ("+", "-"):
+                delta = 1 if text == "+" else -1
+                self._scene_ctrl.adjust_array_place_count(delta)
+                event.accept()
+                return
+        if (
+            self._scene_ctrl is not None and self._scene_ctrl.array_place_mode
+            and key in (
+                Qt.Key.Key_Left, Qt.Key.Key_Right,
+                Qt.Key.Key_Plus, Qt.Key.Key_Equal,
+                Qt.Key.Key_Minus, Qt.Key.Key_Underscore,
+            )
+        ):
+            if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+                delta = 1
+            elif key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+                delta = -1
+            else:
+                delta = -1 if key == Qt.Key.Key_Left else 1
+            self._scene_ctrl.adjust_array_place_count(delta)
+            event.accept()
+            return
         if key == Qt.Key.Key_Space and self._on_space:
             if self._on_space():
                 event.accept()
