@@ -16,11 +16,14 @@ from app.ui.widgets import FocusDoubleSpinBox, FocusSpinBox
 
 
 class PropertiesPanel(QScrollArea):
-    def __init__(self, document: Document, on_change, on_reorigin=None, parent=None):
+    def __init__(self, document: Document, on_change, on_reorigin=None, on_explode_dxf=None,
+                 on_explode_geometry=None, parent=None):
         super().__init__(parent)
         self.document = document
         self.on_change = on_change
         self.on_reorigin = on_reorigin
+        self.on_explode_dxf = on_explode_dxf
+        self.on_explode_geometry = on_explode_geometry
         self._container = QWidget()
         self._layout = QVBoxLayout(self._container)
         self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -73,6 +76,10 @@ class PropertiesPanel(QScrollArea):
             r = self.document.get_drawn_rect(sel.object_id)
             if r:
                 self._build_drawn_rect(r)
+        elif sel.kind == SelectionKind.DRAWN_GEOMETRY:
+            g = self.document.get_drawn_geometry(sel.object_id)
+            if g:
+                self._build_drawn_geometry(g)
         elif sel.kind == SelectionKind.ORIGIN:
             self._build_origin()
         else:
@@ -425,10 +432,80 @@ class PropertiesPanel(QScrollArea):
             setattr(r, attr, value)
         self._chg(apply)
 
+    def _build_drawn_geometry(self, geom) -> None:
+        from app.geometry.geometry_edit import arc_points, line_length
+        from app.geometry.dxf_entities import entity_type_label
+
+        gbox = QGroupBox("Элемент")
+        form = QFormLayout(gbox)
+        gid = geom.id
+        form.addRow("Тип:", QLabel(entity_type_label(geom.entity)))
+        form.addRow("Имя:", QLabel(geom.name))
+        ent = geom.entity
+        t = ent.get("type")
+        if t == "line":
+            form.addRow("X1:", self._spin_f(
+                ent["x1"], on_apply=lambda v: self._set_geometry_attr(gid, "x1", v),
+            ))
+            form.addRow("Y1:", self._spin_f(
+                ent["y1"], on_apply=lambda v: self._set_geometry_attr(gid, "y1", v),
+            ))
+            form.addRow("X2:", self._spin_f(
+                ent["x2"], on_apply=lambda v: self._set_geometry_attr(gid, "x2", v),
+            ))
+            form.addRow("Y2:", self._spin_f(
+                ent["y2"], on_apply=lambda v: self._set_geometry_attr(gid, "y2", v),
+            ))
+            form.addRow("Длина:", self._spin_f(
+                line_length(ent), 0.1, 100000,
+                on_apply=lambda v: self._set_geometry_attr(gid, "length", v),
+            ))
+        elif t == "arc":
+            start, end, mid = arc_points(ent)
+            form.addRow("Начало X:", self._spin_f(
+                start[0], on_apply=lambda v: self._set_geometry_attr(gid, "start_x", v),
+            ))
+            form.addRow("Начало Y:", self._spin_f(
+                start[1], on_apply=lambda v: self._set_geometry_attr(gid, "start_y", v),
+            ))
+            form.addRow("Конец X:", self._spin_f(
+                end[0], on_apply=lambda v: self._set_geometry_attr(gid, "end_x", v),
+            ))
+            form.addRow("Конец Y:", self._spin_f(
+                end[1], on_apply=lambda v: self._set_geometry_attr(gid, "end_y", v),
+            ))
+            form.addRow("Середина X:", self._spin_f(
+                mid[0], on_apply=lambda v: self._set_geometry_attr(gid, "mid_x", v),
+            ))
+            form.addRow("Середина Y:", self._spin_f(
+                mid[1], on_apply=lambda v: self._set_geometry_attr(gid, "mid_y", v),
+            ))
+            form.addRow("Радиус:", self._spin_f(
+                ent["r"], 0.1, 100000,
+                on_apply=lambda v: self._set_geometry_attr(gid, "radius", v),
+            ))
+        elif t == "polyline":
+            pts = ent.get("points") or []
+            form.addRow("Сегментов:", QLabel(str(len(pts))))
+            if self.on_explode_geometry is not None and len(pts) >= 2:
+                btn = QPushButton("Разобрать полилинию")
+                btn.clicked.connect(lambda: self.on_explode_geometry(gid))
+                form.addRow("", btn)
+        self._layout.addWidget(gbox)
+
+    def _set_geometry_attr(self, geometry_id: str, attr: str, value: float) -> None:
+        def apply():
+            self.document.set_geometry_attr(geometry_id, attr, value)
+        self._chg(apply)
+
     def _build_contour(self):
         g = QGroupBox("Контур")
         form = QFormLayout(g)
         doc = self.document
+        if doc.contour_kind == ContourKind.NONE:
+            form.addRow("", QLabel("Контур не задан. Выберите тип вверху."))
+            self._layout.addWidget(g)
+            return
         if doc.contour_kind == ContourKind.DXF:
             form.addRow("Тип:", QLabel("Импортированный DXF"))
             if doc.dxf_contour.source_file:
@@ -436,6 +513,10 @@ class PropertiesPanel(QScrollArea):
             form.addRow("Элементов:", QLabel(str(len(doc.dxf_contour.entities))))
             _, _, w, h = doc.contour_bounds()
             form.addRow("Габариты:", QLabel(f"{w:.1f} × {h:.1f} мм"))
+            if self.on_explode_dxf is not None:
+                btn = QPushButton("Разрушить контур")
+                btn.clicked.connect(self.on_explode_dxf)
+                form.addRow("", btn)
             self._add_show_dims_row(form, "contour")
             self._layout.addWidget(g)
             return

@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QApplication, QGraphicsEllipseItem, QGraphicsItem, Q
 
 from app.editor.guides import SnapGuideItem
 from app.editor.placement_preview import ToolPlacementPreview
+from app.editor.geometry_items import DrawnGeometryGraphicsItem
 from app.editor.infinite_line_items import InfiniteLineGraphicsItem
 from app.editor.rectangle_items import DrawnRectangleGraphicsItem
 from app.editor.shutter_items import ShutterRegionGraphicsItem
@@ -30,6 +31,7 @@ SCENE_EXTENT = 200_000.0
 class EditorSceneController:
     def __init__(self, document: Document, scene: QGraphicsScene, on_edit_dimension=None,
                  on_add_shutter=None, on_add_infinite_line=None, on_add_rectangle=None,
+                 on_add_line=None,
                  on_place_hole=None, on_place_array=None,
                  on_aux_distance_input=None, on_rect_size_input=None):
         self.document = document
@@ -38,6 +40,7 @@ class EditorSceneController:
         self.on_add_shutter = on_add_shutter
         self.on_add_infinite_line = on_add_infinite_line
         self.on_add_rectangle = on_add_rectangle
+        self.on_add_line = on_add_line
         self.on_place_hole = on_place_hole
         self.on_place_array = on_place_array
         self.on_aux_distance_input = on_aux_distance_input
@@ -62,6 +65,7 @@ class EditorSceneController:
         self.shutter_mode = False
         self.aux_line_mode = False
         self.rectangle_mode = False
+        self.line_mode = False
         self.hole_place_mode = False
         self.array_place_mode = False
         self._hole_place_cursor: tuple[float, float] | None = None
@@ -77,6 +81,7 @@ class EditorSceneController:
         self._aux_preview: QGraphicsPathItem | None = None
         self._shutter_draw_p1: tuple[float, float] | None = None
         self._rect_draw_p1: tuple[float, float] | None = None
+        self._line_draw_p1: tuple[float, float] | None = None
         self._rect_preview: QGraphicsRectItem | None = None
         self._shutter_preview: QGraphicsRectItem | None = None
         self._shutter_drag_dim_refs: dict[str, float] = {}
@@ -110,7 +115,13 @@ class EditorSceneController:
         doc.sync_infinite_lines()
         sel = doc.selection
 
-        self.scene.addItem(ContourGraphicsItem(doc, self.colors, self._on_select))
+        if doc.contour_kind != ContourKind.NONE:
+            self.scene.addItem(ContourGraphicsItem(doc, self.colors, self._on_select))
+
+        for geom in doc.drawn_geometries:
+            self._build_drawn_geometry(geom)
+            if sel.kind == SelectionKind.DRAWN_GEOMETRY and sel.object_id == geom.id:
+                self._build_drawn_geometry_dims(geom)
 
         for hole in doc.holes:
             resolved_list = doc._resolve_single_hole(hole)
@@ -206,6 +217,7 @@ class EditorSceneController:
             "shutter": SelectionKind.SHUTTER,
             "infinite_line": SelectionKind.INFINITE_LINE,
             "drawn_rect": SelectionKind.DRAWN_RECT,
+            "drawn_geometry": SelectionKind.DRAWN_GEOMETRY,
             "origin": SelectionKind.ORIGIN,
         }
         self.document.select(mapping.get(kind, SelectionKind.NONE), obj_id, notify=notify)
@@ -409,6 +421,8 @@ class EditorSceneController:
             return True
         if sel.kind == SelectionKind.DRAWN_RECT and sel.object_id:
             self.document.toggle_object_show_dims("drawn_rect", sel.object_id)
+        if sel.kind == SelectionKind.DRAWN_GEOMETRY and sel.object_id:
+            pass
             return True
         return False
 
@@ -1107,6 +1121,10 @@ class EditorSceneController:
             if sel.kind == SelectionKind.DRAWN_RECT and sel.object_id == owner_id:
                 return True
             return False
+        if owner_kind == "drawn_geometry":
+            if sel.kind == SelectionKind.DRAWN_GEOMETRY and sel.object_id == owner_id:
+                return True
+            return False
         return False
 
     def _should_show_leader(self, note_id: str, owner_kind: str, owner_id: str = "") -> bool:
@@ -1509,6 +1527,19 @@ class EditorSceneController:
             self.document.move_drawn_rect(r.id, sx, sy)
             self.document.notify()
             return True
+        if sel.kind == SelectionKind.DRAWN_GEOMETRY:
+            g = self.document.get_drawn_geometry(sel.object_id)
+            if g is None:
+                return False
+            from app.geometry.dxf_entities import entity_center
+            cx, cy = entity_center(g.entity)
+            sx, sy, _, _ = self._snap_drag(
+                cx + dx, cy + dy,
+                self.document.snap_points_for_geometry_drag(g.id), g.id,
+            )
+            self.document.move_drawn_geometry(g.id, sx - cx, sy - cy)
+            self.document.notify()
+            return True
         if sel.kind == SelectionKind.HOLE:
             hole = self.document.get_hole(sel.object_id)
             if hole is None:
@@ -1721,6 +1752,7 @@ class EditorSceneController:
             self.cancel_shutter()
             self.cancel_aux_line()
             self.cancel_rectangle()
+            self.cancel_line()
             self.cancel_hole_place()
             self.cancel_array_place()
         if not active:
@@ -2070,6 +2102,7 @@ class EditorSceneController:
         if active:
             self.cancel_aux_line()
             self.cancel_rectangle()
+            self.cancel_line()
             self.cancel_hole_place()
             self.cancel_array_place()
         if not active:
@@ -2233,6 +2266,7 @@ class EditorSceneController:
             self.cancel_shutter()
             self.cancel_aux_line()
             self.cancel_rectangle()
+            self.cancel_line()
             self.cancel_hole_place()
             self.origin_placement_mode = False
             hole = self.document.get_hole(hole_id)
@@ -2414,6 +2448,7 @@ class EditorSceneController:
             self.cancel_measure()
             self.cancel_shutter()
             self.cancel_rectangle()
+            self.cancel_line()
             self.cancel_hole_place()
             self.cancel_array_place()
             self.origin_placement_mode = False
@@ -2532,6 +2567,7 @@ class EditorSceneController:
             self.cancel_measure()
             self.cancel_shutter()
             self.cancel_aux_line()
+            self.cancel_line()
             self.cancel_hole_place()
             self.cancel_array_place()
             self.origin_placement_mode = False
@@ -2610,4 +2646,150 @@ class EditorSceneController:
         else:
             self.document.add_drawn_rect(cx, cy, w, h)
         self.rectangle_mode = False
+        return True
+
+    # --- drawn geometry ---
+
+    def _on_drawn_geometry_select(self, geometry_id: str, notify: bool = True) -> None:
+        self.document.select(SelectionKind.DRAWN_GEOMETRY, geometry_id, notify=notify)
+
+    def _build_drawn_geometry(self, geom) -> None:
+        sel = self.document.selection
+        selected = sel.kind == SelectionKind.DRAWN_GEOMETRY and sel.object_id == geom.id
+        self.scene.addItem(DrawnGeometryGraphicsItem(
+            geom, self.colors, selected,
+            on_select=self._on_drawn_geometry_select,
+            on_move=self._on_drawn_geometry_move,
+            on_move_end=self._on_drawn_geometry_move_end,
+            get_view_scale=self._view_scale,
+        ))
+
+    def _on_drawn_geometry_move(self, geometry_id: str, dx: float, dy: float) -> tuple[float, float]:
+        g = self.document.get_drawn_geometry(geometry_id)
+        if g is None:
+            return dx, dy
+        from app.geometry.dxf_entities import entity_center
+        cx, cy = entity_center(g.entity)
+        sx, sy, _, guides = self._snap_drag(
+            cx + dx, cy + dy,
+            self.document.snap_points_for_geometry_drag(geometry_id), geometry_id,
+        )
+        self._show_snap_guides(guides)
+        return sx - cx, sy - cy
+
+    def _on_drawn_geometry_move_end(self, geometry_id: str) -> None:
+        self._guide_item.clear()
+        self.document.notify()
+
+    def _build_drawn_geometry_dims(self, geom) -> None:
+        from app.geometry.geometry_edit import arc_points, line_length
+
+        gid = geom.id
+        color = geom.color
+        ent = geom.entity
+        ox, oy = self.document.datum_origin()
+        t = ent.get("type")
+        if t == "line":
+            x1, y1, x2, y2 = ent["x1"], ent["y1"], ent["x2"], ent["y2"]
+            self._add_dim(
+                f"{gid}_gx1", "top", ox, x1, y1, format_dim(x1 - ox), color,
+                "drawn_geometry", gid, ext1=y1, ext2=y1,
+            )
+            self._add_dim(
+                f"{gid}_gy1", "left", oy, y1, x1, format_dim(y1 - oy), color,
+                "drawn_geometry", gid, ext1=x1, ext2=x1,
+            )
+            self._add_dim(
+                f"{gid}_gx2", "bottom", ox, x2, y2, format_dim(x2 - ox), color,
+                "drawn_geometry", gid, ext1=y2, ext2=y2,
+            )
+            self._add_dim(
+                f"{gid}_gy2", "right", oy, y2, x2, format_dim(y2 - oy), color,
+                "drawn_geometry", gid, ext1=x2, ext2=x2,
+            )
+            self._add_dim(
+                f"{gid}_glen", "top", 0, line_length(ent), min(y1, y2),
+                format_dim(line_length(ent)), color, "drawn_geometry", gid,
+                pt1=(x1, y1), pt2=(x2, y2),
+            )
+        elif t == "arc":
+            start, end, mid = arc_points(ent)
+            cx, cy, r = ent["cx"], ent["cy"], ent["r"]
+            self._add_dim(
+                f"{gid}_asx", "top", ox, start[0], start[1], format_dim(start[0] - ox), color,
+                "drawn_geometry", gid, ext1=start[1], ext2=start[1],
+            )
+            self._add_dim(
+                f"{gid}_asy", "left", oy, start[1], start[0], format_dim(start[1] - oy), color,
+                "drawn_geometry", gid, ext1=start[0], ext2=start[0],
+            )
+            self._add_dim(
+                f"{gid}_aex", "bottom", ox, end[0], end[1], format_dim(end[0] - ox), color,
+                "drawn_geometry", gid, ext1=end[1], ext2=end[1],
+            )
+            self._add_dim(
+                f"{gid}_aey", "right", oy, end[1], end[0], format_dim(end[1] - oy), color,
+                "drawn_geometry", gid, ext1=end[0], ext2=end[0],
+            )
+            self._add_dim(
+                f"{gid}_amx", "top", ox, mid[0], mid[1], format_dim(mid[0] - ox), color,
+                "drawn_geometry", gid, ext1=mid[1], ext2=mid[1],
+            )
+            self._add_dim(
+                f"{gid}_amy", "left", oy, mid[1], mid[0], format_dim(mid[1] - oy), color,
+                "drawn_geometry", gid, ext1=mid[0], ext2=mid[0],
+            )
+            self._add_dim(
+                f"{gid}_ar", "right", cx, cx + r, cy, format_dim(r), color,
+                "drawn_geometry", gid, ext1=cy, ext2=cy,
+            )
+
+    # --- line tool ---
+
+    def set_line_mode(self, active: bool) -> None:
+        self.line_mode = active
+        if active:
+            self.cancel_measure()
+            self.cancel_shutter()
+            self.cancel_aux_line()
+            self.cancel_rectangle()
+            self.cancel_hole_place()
+            self.cancel_array_place()
+            self.origin_placement_mode = False
+        if not active:
+            self._line_draw_p1 = None
+            self._placement_preview.clear()
+
+    def cancel_line(self) -> None:
+        self.set_line_mode(False)
+
+    def line_press(self, x: float, y: float) -> None:
+        if not self.line_mode:
+            return
+        sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
+        self._line_draw_p1 = (sx, sy)
+        self._placement_preview.show_line(sx, sy, sx + 1.0, sy + 1.0)
+
+    def line_move(self, x: float, y: float) -> None:
+        if not self.line_mode or self._line_draw_p1 is None:
+            return
+        sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
+        p1 = self._line_draw_p1
+        self._placement_preview.show_line(p1[0], p1[1], sx, sy)
+
+    def line_release(self, x: float, y: float) -> bool:
+        if not self.line_mode or self._line_draw_p1 is None:
+            return False
+        sx, sy, _ = self.snap_measure_point(x, y, self._view_scale())
+        p1 = self._line_draw_p1
+        self._line_draw_p1 = None
+        self._placement_preview.clear()
+        self._guide_item.clear()
+        if math.hypot(sx - p1[0], sy - p1[1]) < 1.0:
+            return False
+        if self.on_add_line:
+            self.on_add_line(p1[0], p1[1], sx, sy)
+        else:
+            self.document.add_drawn_line(p1[0], p1[1], sx, sy)
+        self.line_mode = False
         return True

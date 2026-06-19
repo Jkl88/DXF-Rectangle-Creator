@@ -18,14 +18,17 @@ class ElementTree(QTreeWidget):
     def refresh(self):
         self.clear()
         doc = self.document
-        label = "DXF" if doc.contour_kind == ContourKind.DXF else doc.contour_kind.value
-        contour = QTreeWidgetItem([f"Контур ({label})"])
-        contour.setData(0, Qt.ItemDataRole.UserRole, ("contour", ""))
-        self.addTopLevelItem(contour)
-        if doc.contour_kind == ContourKind.DXF and doc.dxf_contour.origin_set:
-            origin = QTreeWidgetItem(["Нулевая точка"])
-            origin.setData(0, Qt.ItemDataRole.UserRole, ("origin", ""))
-            contour.addChild(origin)
+        label = "нет" if doc.contour_kind == ContourKind.NONE else (
+            "DXF" if doc.contour_kind == ContourKind.DXF else doc.contour_kind.value
+        )
+        if doc.contour_kind != ContourKind.NONE:
+            contour = QTreeWidgetItem([f"Контур ({label})"])
+            contour.setData(0, Qt.ItemDataRole.UserRole, ("contour", ""))
+            self.addTopLevelItem(contour)
+            if doc.contour_kind == ContourKind.DXF and doc.dxf_contour.origin_set:
+                origin = QTreeWidgetItem(["Нулевая точка"])
+                origin.setData(0, Qt.ItemDataRole.UserRole, ("origin", ""))
+                contour.addChild(origin)
 
         if doc.holes:
             holes_root = QTreeWidgetItem(["Отверстия"])
@@ -76,6 +79,15 @@ class ElementTree(QTreeWidget):
                 rects_root.addChild(r_item)
             rects_root.setExpanded(True)
 
+        if doc.drawn_geometries:
+            geom_root = QTreeWidgetItem(["Геометрия"])
+            self.addTopLevelItem(geom_root)
+            for i, g in enumerate(doc.drawn_geometries, 1):
+                g_item = QTreeWidgetItem([g.display_name(i)])
+                g_item.setData(0, Qt.ItemDataRole.UserRole, ("drawn_geometry", g.id))
+                geom_root.addChild(g_item)
+            geom_root.setExpanded(True)
+
         tb = QTreeWidgetItem(["Таблица"])
         tb.setData(0, Qt.ItemDataRole.UserRole, ("title_block", ""))
         self.addTopLevelItem(tb)
@@ -95,6 +107,7 @@ class ElementTree(QTreeWidget):
             "shutter": SelectionKind.SHUTTER,
             "infinite_line": SelectionKind.INFINITE_LINE,
             "drawn_rect": SelectionKind.DRAWN_RECT,
+            "drawn_geometry": SelectionKind.DRAWN_GEOMETRY,
             "title_block": SelectionKind.TITLE_BLOCK,
             "origin": SelectionKind.ORIGIN,
         }

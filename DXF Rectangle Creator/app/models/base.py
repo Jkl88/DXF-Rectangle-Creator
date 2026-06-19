@@ -11,6 +11,7 @@ class ContourKind(Enum):
     RECT = "rect"
     CIRCLE = "circle"
     DXF = "dxf"
+    NONE = "none"
 
 
 class CornerMode(Enum):
@@ -48,6 +49,7 @@ class SelectionKind(Enum):
     SHUTTER = "shutter"
     INFINITE_LINE = "infinite_line"
     DRAWN_RECT = "drawn_rect"
+    DRAWN_GEOMETRY = "drawn_geometry"
 
 
 @dataclass
@@ -276,6 +278,18 @@ class DrawnRectangle:
 
     def display_name(self, index: int) -> str:
         return self.name or f"Прямоугольник {index}"
+
+
+@dataclass
+class DrawnGeometry:
+    """Отдельный геометрический элемент (линия, дуга, полилиния и т.д.)."""
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    name: str = ""
+    entity: dict = field(default_factory=dict)
+    color: str = "#495057"
+
+    def display_name(self, index: int) -> str:
+        return self.name or f"Элемент {index}"
 
 
 @dataclass

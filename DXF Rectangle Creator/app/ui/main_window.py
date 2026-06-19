@@ -13,8 +13,9 @@ from PyQt6.QtWidgets import (
 )
 
 from app.commands import (
-    AddArrayCommand, AddDrawnRectCommand, AddHoleCommand, AddInfiniteLineCommand,
-    AddShutterCommand, DeleteCommand, PropertyChangeCommand,
+    AddArrayCommand, AddDrawnGeometryCommand, AddDrawnRectCommand, AddHoleCommand,
+    AddInfiniteLineCommand,     AddShutterCommand, DeleteCommand, ExplodeDxfContourCommand, ExplodeDrawnGeometryCommand,
+    PropertyChangeCommand,
 )
 from app.editor.scene import EditorSceneController
 from app.editor.title_block import TitleBlockWidget
@@ -100,12 +101,17 @@ class MainWindow(QMainWindow):
         self.btnRectangle.setObjectName("toolToggle")
         self.btnRectangle.setCheckable(True)
         self.btnRectangle.clicked.connect(self._toggle_rectangle)
+        self.btnLine = QPushButton("Линия")
+        self.btnLine.setObjectName("toolToggle")
+        self.btnLine.setCheckable(True)
+        self.btnLine.clicked.connect(self._toggle_line)
         toolbar.addWidget(self.btnAddHole)
         toolbar.addWidget(self.btnAddArray)
         toolbar.addWidget(self.btnMeasure)
         toolbar.addWidget(self.btnShutters)
         toolbar.addWidget(self.btnAuxLine)
         toolbar.addWidget(self.btnRectangle)
+        toolbar.addWidget(self.btnLine)
         toolbar.addWidget(self.btnExportDxf)
         toolbar.addWidget(self.chkExportPng)
         toolbar.addWidget(self.btnFit)
@@ -133,6 +139,7 @@ class MainWindow(QMainWindow):
             on_shutter_mode_changed=self._set_shutter_mode,
             on_aux_line_mode_changed=self._set_aux_line_mode,
             on_rectangle_mode_changed=self._set_rectangle_mode,
+            on_line_mode_changed=self._set_line_mode,
             on_origin_placement_done=self._on_origin_placed,
             on_hole_place_done=self._end_hole_place_mode,
             on_array_place_done=self._end_array_place_mode,
@@ -144,6 +151,7 @@ class MainWindow(QMainWindow):
             on_add_shutter=self._add_shutter_from_draw,
             on_add_infinite_line=self._add_infinite_line_from_tool,
             on_add_rectangle=self._add_rectangle_from_draw,
+            on_add_line=self._add_line_from_draw,
             on_place_hole=self._on_place_hole,
             on_place_array=self._on_place_array,
             on_aux_distance_input=self._on_aux_distance_input,
@@ -167,7 +175,11 @@ class MainWindow(QMainWindow):
         splitter.addWidget(editor_wrap)
 
         self.properties = PropertiesPanel(
-            self.document, self._apply_property_change, on_reorigin=self._begin_origin_placement,
+            self.document,
+            self._apply_property_change,
+            on_reorigin=self._begin_origin_placement,
+            on_explode_dxf=self._explode_dxf_contour,
+            on_explode_geometry=self._explode_drawn_geometry,
         )
         splitter.addWidget(self.properties)
 
@@ -254,7 +266,7 @@ class MainWindow(QMainWindow):
         self.document.select(SelectionKind.TITLE_BLOCK, "", notify=True)
 
     def _deactivate_tool_buttons(self) -> None:
-        for btn in (self.btnMeasure, self.btnShutters, self.btnAuxLine, self.btnRectangle):
+        for btn in (self.btnMeasure, self.btnShutters, self.btnAuxLine, self.btnRectangle, self.btnLine):
             btn.blockSignals(True)
             btn.setChecked(False)
             btn.blockSignals(False)
@@ -269,6 +281,7 @@ class MainWindow(QMainWindow):
             self.scene_ctrl.cancel_shutter()
             self.scene_ctrl.cancel_aux_line()
             self.scene_ctrl.cancel_rectangle()
+            self.scene_ctrl.cancel_line()
             self.scene_ctrl.cancel_hole_place()
             self.scene_ctrl.cancel_array_place()
             self.scene_ctrl.set_measure_mode(True)
@@ -289,6 +302,7 @@ class MainWindow(QMainWindow):
             self.scene_ctrl.cancel_origin_placement()
             self.scene_ctrl.cancel_aux_line()
             self.scene_ctrl.cancel_rectangle()
+            self.scene_ctrl.cancel_line()
             self.scene_ctrl.cancel_hole_place()
             self.scene_ctrl.cancel_array_place()
             self.scene_ctrl.set_shutter_mode(True)
@@ -308,6 +322,7 @@ class MainWindow(QMainWindow):
             self.scene_ctrl.cancel_measure()
             self.scene_ctrl.cancel_shutter()
             self.scene_ctrl.cancel_rectangle()
+            self.scene_ctrl.cancel_line()
             self.scene_ctrl.cancel_hole_place()
             self.scene_ctrl.cancel_array_place()
             self.scene_ctrl.cancel_origin_placement()
@@ -338,6 +353,27 @@ class MainWindow(QMainWindow):
             if not self.scene_ctrl.origin_placement_mode:
                 self.view.setCursor(Qt.CursorShape.ArrowCursor)
 
+    def _set_line_mode(self, active: bool) -> None:
+        self.btnLine.blockSignals(True)
+        self.btnLine.setChecked(active)
+        self.btnLine.blockSignals(False)
+        if active:
+            self._deactivate_tool_buttons()
+            self.btnLine.setChecked(True)
+            self.scene_ctrl.cancel_measure()
+            self.scene_ctrl.cancel_shutter()
+            self.scene_ctrl.cancel_aux_line()
+            self.scene_ctrl.cancel_rectangle()
+            self.scene_ctrl.cancel_hole_place()
+            self.scene_ctrl.cancel_array_place()
+            self.scene_ctrl.cancel_origin_placement()
+            self.scene_ctrl.set_line_mode(True)
+            self.view.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.scene_ctrl.cancel_line()
+            if not self.scene_ctrl.origin_placement_mode:
+                self.view.setCursor(Qt.CursorShape.ArrowCursor)
+
     def _on_origin_placed(self, x: float, y: float) -> None:
         def apply():
             self.document.place_dxf_origin(x, y)
@@ -353,6 +389,7 @@ class MainWindow(QMainWindow):
         self.scene_ctrl.cancel_shutter()
         self.scene_ctrl.cancel_aux_line()
         self.scene_ctrl.cancel_rectangle()
+        self.scene_ctrl.cancel_line()
         self.scene_ctrl.cancel_hole_place()
         self.scene_ctrl.cancel_array_place()
         self._deactivate_tool_buttons()
@@ -384,6 +421,23 @@ class MainWindow(QMainWindow):
             self._set_rectangle_mode(True)
         else:
             self._set_rectangle_mode(False)
+
+    def _toggle_line(self, checked: bool) -> None:
+        if checked:
+            self._set_line_mode(True)
+        else:
+            self._set_line_mode(False)
+
+    def _explode_dxf_contour(self) -> None:
+        if self.document.contour_kind != ContourKind.DXF:
+            return
+        self._undo_stack.push(ExplodeDxfContourCommand(self.document))
+
+    def _explode_drawn_geometry(self, geometry_id: str) -> None:
+        g = self.document.get_drawn_geometry(geometry_id)
+        if g is None or g.entity.get("type") != "polyline":
+            return
+        self._undo_stack.push(ExplodeDrawnGeometryCommand(self.document, geometry_id))
 
     def _add_shutter_from_draw(self, cx: float, cy: float, width: float, height: float) -> None:
         from app.models.base import ShutterRegion
@@ -417,6 +471,18 @@ class MainWindow(QMainWindow):
             color=self.document.next_hole_color(),
         )
         self._undo_stack.push(AddDrawnRectCommand(self.document, rect))
+
+    def _add_line_from_draw(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        from app.models.base import DrawnGeometry
+        from app.geometry.dxf_entities import entity_display_name
+        idx = len(self.document.drawn_geometries) + 1
+        entity = {"type": "line", "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+        geom = DrawnGeometry(
+            entity=entity,
+            name=entity_display_name(entity, idx),
+            color=self.document.next_hole_color(),
+        )
+        self._undo_stack.push(AddDrawnGeometryCommand(self.document, geom))
 
     def _edit_title_block_field(self, field: str) -> None:
         from PyQt6.QtWidgets import QInputDialog
@@ -493,6 +559,9 @@ class MainWindow(QMainWindow):
         self.btnContourRect.blockSignals(True)
         self.btnContourCircle.blockSignals(True)
         if is_dxf:
+            self.btnContourRect.setChecked(False)
+            self.btnContourCircle.setChecked(False)
+        elif self.document.contour_kind == ContourKind.NONE:
             self.btnContourRect.setChecked(False)
             self.btnContourCircle.setChecked(False)
         else:
@@ -884,11 +953,32 @@ def main():
         window.activateWindow()
 
     def _handle_ipc_socket(sock) -> None:
-        data = bytes(sock.readAll())
-        sock.deleteLater()
-        for path in decode_ipc_messages(data):
-            QTimer.singleShot(0, lambda p=path: window.import_dxf_from_path(p))
-        QTimer.singleShot(0, _activate_window)
+        processed = False
+
+        def _process_message() -> None:
+            nonlocal processed
+            if processed:
+                return
+            if sock.bytesAvailable() == 0:
+                sock.waitForReadyRead(5000)
+            data = bytes(sock.readAll())
+            if not data:
+                return
+            processed = True
+            try:
+                sock.readyRead.disconnect(_process_message)
+            except (TypeError, RuntimeError):
+                pass
+            sock.disconnectFromServer()
+            sock.deleteLater()
+            for path in decode_ipc_messages(data):
+                QTimer.singleShot(0, lambda p=path: window.import_dxf_from_path(p))
+            QTimer.singleShot(0, _activate_window)
+
+        if sock.bytesAvailable() > 0:
+            _process_message()
+        else:
+            sock.readyRead.connect(_process_message)
 
     if ipc_server is not None:
         def _on_ipc_connection() -> None:

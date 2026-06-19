@@ -12,6 +12,7 @@ from app.models.base import (
     ContourKind,
     DimensionState,
     DrawnRectangle,
+    DrawnGeometry,
     DxfContour,
     Hole,
     HoleArray,
@@ -63,6 +64,7 @@ class Document:
     shutter_layout: ShutterLayoutParams = field(default_factory=ShutterLayoutParams.defaults)
     infinite_lines: list[InfiniteLine] = field(default_factory=list)
     drawn_rects: list[DrawnRectangle] = field(default_factory=list)
+    drawn_geometries: list[DrawnGeometry] = field(default_factory=list)
     _listeners: list[Callable[[], None]] = field(default_factory=list, repr=False)
 
     def subscribe(self, callback: Callable[[], None]) -> None:
@@ -87,6 +89,8 @@ class Document:
         return x + w / 2, y + h / 2
 
     def contour_bounds(self) -> tuple[float, float, float, float]:
+        if self.contour_kind == ContourKind.NONE:
+            return self.free_content_bounds()
         if self.contour_kind == ContourKind.CIRCLE:
             d = self.circle.diameter
             return 0, 0, d, d
@@ -98,8 +102,35 @@ class Document:
             return entities_bbox(self.dxf_contour.entities, extra_points=extra or None)
         return 0, 0, self.rect.width, self.rect.height
 
+    def free_content_bounds(self) -> tuple[float, float, float, float]:
+        from app.geometry.dxf_entities import entities_bbox
+        from app.geometry.shutter import region_bounds
+
+        entities = [g.entity for g in self.drawn_geometries]
+        extra: list[tuple[float, float]] = []
+        for hole in self.holes:
+            extra.append((hole.cx, hole.cy))
+        for r in self.drawn_rects:
+            left, top, right, bottom = region_bounds(r.cx, r.cy, r.width, r.height)
+            extra.extend([(left, top), (right, bottom)])
+        for s in self.shutters:
+            left, top, right, bottom = region_bounds(s.cx, s.cy, s.width, s.height)
+            extra.extend([(left, top), (right, bottom)])
+        if entities:
+            return entities_bbox(entities, extra_points=extra or None)
+        if extra:
+            xs = [p[0] for p in extra]
+            ys = [p[1] for p in extra]
+            xmin, xmax = min(xs), max(xs)
+            ymin, ymax = min(ys), max(ys)
+            return xmin, ymin, max(xmax - xmin, 1.0), max(ymax - ymin, 1.0)
+        return 0.0, 0.0, 120.0, 48.0
+
     def update_auto_name(self) -> None:
-        if self.contour_kind == ContourKind.CIRCLE:
+        if self.contour_kind == ContourKind.NONE:
+            _, _, w, h = self.free_content_bounds()
+            self.name = f"G_{w:.1f}x{h:.1f}"
+        elif self.contour_kind == ContourKind.CIRCLE:
             self.name = f"C_{self.circle.diameter:.1f}"
         elif self.contour_kind == ContourKind.DXF:
             if self.dxf_contour.source_file:
@@ -141,6 +172,9 @@ class Document:
         for r in self.drawn_rects:
             r.cx += dx
             r.cy += dy
+        for g in self.drawn_geometries:
+            from app.geometry.dxf_entities import translate_entities
+            g.entity = translate_entities([g.entity], dx, dy)[0]
         for key, (ox, oy) in list(self.instance_overrides.items()):
             self.instance_overrides[key] = (ox + dx, oy + dy)
 
@@ -254,6 +288,11 @@ class Document:
         elif sel.kind == SelectionKind.DRAWN_RECT and sel.object_id:
             rid = sel.object_id
             self.drawn_rects = [r for r in self.drawn_rects if r.id != rid]
+        elif sel.kind == SelectionKind.DRAWN_GEOMETRY and sel.object_id:
+            gid = sel.object_id
+            self.drawn_geometries = [g for g in self.drawn_geometries if g.id != gid]
+            for did in self.dim_ids_for_geometry(gid):
+                self.dim_states.pop(did, None)
         self.select(SelectionKind.NONE)
         self.notify()
 
@@ -803,6 +842,50 @@ class Document:
             line = self.get_infinite_line(dim_id[:-5])
             if line is not None:
                 return abs(line.offset)
+        geom_dim = self._geometry_dimension_value(dim_id)
+        if geom_dim is not None:
+            return geom_dim
+        return None
+
+    def _geometry_dimension_value(self, dim_id: str) -> float | None:
+        from app.geometry.geometry_edit import arc_points, line_length
+        suffix_map = {
+            "_gx1": ("line", "x1"),
+            "_gy1": ("line", "y1"),
+            "_gx2": ("line", "x2"),
+            "_gy2": ("line", "y2"),
+            "_glen": ("line", "length"),
+            "_ar": ("arc", "radius"),
+        }
+        for suffix, (kind, attr) in suffix_map.items():
+            if not dim_id.endswith(suffix):
+                continue
+            gid = dim_id[: -len(suffix)]
+            g = self.get_drawn_geometry(gid)
+            if g is None or g.entity.get("type") != kind:
+                return None
+            ent = g.entity
+            if attr == "length":
+                return line_length(ent)
+            if attr == "radius":
+                return ent["r"]
+            return float(ent[attr])
+        arc_point_map = {
+            "_asx": 0, "_asy": 1, "_aex": 0, "_aey": 1, "_amx": 0, "_amy": 1,
+        }
+        for suffix, idx in arc_point_map.items():
+            if not dim_id.endswith(suffix):
+                continue
+            gid = dim_id[: -len(suffix)]
+            g = self.get_drawn_geometry(gid)
+            if g is None or g.entity.get("type") != "arc":
+                return None
+            start, end, mid = arc_points(g.entity)
+            if suffix.startswith("_as"):
+                return start[idx]
+            if suffix.startswith("_ae"):
+                return end[idx]
+            return mid[idx]
         return None
 
     @staticmethod
@@ -1010,6 +1093,24 @@ class Document:
             if s is not None:
                 s.height = max(1.0, value)
                 return True
+        if self._set_geometry_dimension(dim_id, value):
+            return True
+        return False
+
+    def _set_geometry_dimension(self, dim_id: str, value: float) -> bool:
+        suffix_attr = {
+            "_gx1": "x1", "_gy1": "y1", "_gx2": "x2", "_gy2": "y2", "_glen": "length",
+            "_asx": "start_x", "_asy": "start_y", "_aex": "end_x", "_aey": "end_y",
+            "_amx": "mid_x", "_amy": "mid_y", "_ar": "radius",
+        }
+        for suffix, attr in suffix_attr.items():
+            if not dim_id.endswith(suffix):
+                continue
+            gid = dim_id[: -len(suffix)]
+            if self.get_drawn_geometry(gid) is None:
+                return False
+            self.set_geometry_attr(gid, attr, value)
+            return True
         return False
 
     def set_hole_polygon_dims(self, hole_id: str, diameter: float, sides: int) -> bool:
@@ -1260,6 +1361,188 @@ class Document:
         r.cx, r.cy, r.width, r.height = apply_edge_position(
             edge, r.cx, r.cy, r.width, r.height, value,
         )
+
+    def add_drawn_geometry(self, entity: dict, *, name: str = "") -> DrawnGeometry:
+        import copy
+        from app.geometry.dxf_entities import entity_display_name
+        idx = len(self.drawn_geometries) + 1
+        g = DrawnGeometry(
+            entity=copy.deepcopy(entity),
+            name=name or entity_display_name(entity, idx),
+            color=HOLE_COLORS[(idx - 1) % len(HOLE_COLORS)],
+        )
+        self.drawn_geometries.append(g)
+        self.select(SelectionKind.DRAWN_GEOMETRY, g.id)
+        self.notify()
+        return g
+
+    def add_drawn_line(self, x1: float, y1: float, x2: float, y2: float) -> DrawnGeometry:
+        return self.add_drawn_geometry({
+            "type": "line",
+            "x1": x1, "y1": y1,
+            "x2": x2, "y2": y2,
+        })
+
+    def get_drawn_geometry(self, geometry_id: str) -> Optional[DrawnGeometry]:
+        for g in self.drawn_geometries:
+            if g.id == geometry_id:
+                return g
+        return None
+
+    def move_drawn_geometry(self, geometry_id: str, dx: float, dy: float) -> None:
+        if self.is_movement_blocked(SelectionKind.DRAWN_GEOMETRY, geometry_id):
+            return
+        g = self.get_drawn_geometry(geometry_id)
+        if g is None:
+            return
+        from app.geometry.dxf_entities import translate_entities
+        g.entity = translate_entities([g.entity], dx, dy)[0]
+
+    def snap_points_for_geometry_drag(self, geometry_id: str) -> list[tuple[float, float]]:
+        from app.geometry.dxf_entities import entity_snap_points
+        points = self.snap_points_for_drag("", 0)
+        for g in self.drawn_geometries:
+            if g.id != geometry_id:
+                points.extend(entity_snap_points([g.entity]))
+        for r in self.drawn_rects:
+            points.append((r.cx, r.cy))
+        return points
+
+    def explode_dxf_contour(self) -> list[DrawnGeometry]:
+        if self.contour_kind != ContourKind.DXF:
+            return []
+        import copy
+        from app.geometry.dxf_entities import (
+            entities_bbox, entity_display_name, explode_entity_into_pieces, translate_entities,
+        )
+        from app.models.base import DxfContour
+
+        entities = [e for e in self.dxf_contour.entities if not e.get("pick_only")]
+        if not entities:
+            return []
+        xmin, ymin, _, _ = entities_bbox(entities)
+        if abs(xmin) > 1e-9 or abs(ymin) > 1e-9:
+            self.shift_all_geometry(-xmin, -ymin)
+            entities = translate_entities([copy.deepcopy(e) for e in entities], -xmin, -ymin)
+        else:
+            entities = [copy.deepcopy(e) for e in entities]
+        created: list[DrawnGeometry] = []
+        hole_idx = len(self.holes)
+        geom_idx = len(self.drawn_geometries)
+        from app.geometry.dxf_entities import entity_display_name, explode_entity_into_pieces
+        for ent in entities:
+            for piece in explode_entity_into_pieces(ent):
+                if piece.get("type") == "circle":
+                    hole_idx += 1
+                    self.holes.append(Hole(
+                        cx=piece["cx"],
+                        cy=piece["cy"],
+                        diameter=max(piece["r"] * 2, 0.1),
+                        name=f"Отверстие {hole_idx}",
+                        color=HOLE_COLORS[(hole_idx - 1) % len(HOLE_COLORS)],
+                    ))
+                    continue
+                geom_idx += 1
+                g = DrawnGeometry(
+                    entity=piece,
+                    name=entity_display_name(piece, geom_idx),
+                    color=HOLE_COLORS[(geom_idx - 1) % len(HOLE_COLORS)],
+                )
+                self.drawn_geometries.append(g)
+                created.append(g)
+        self.contour_kind = ContourKind.NONE
+        self.dxf_contour = DxfContour()
+        self.update_auto_name()
+        if created:
+            self.select(SelectionKind.DRAWN_GEOMETRY, created[0].id, notify=False)
+        elif self.holes:
+            self.select(SelectionKind.HOLE, self.holes[-1].id, notify=False)
+        self.notify()
+        return created
+
+    def explode_drawn_geometry(self, geometry_id: str) -> list[DrawnGeometry]:
+        from app.geometry.dxf_entities import entity_display_name, explode_polyline
+
+        g = self.get_drawn_geometry(geometry_id)
+        if g is None or g.entity.get("type") != "polyline":
+            return []
+        parts = explode_polyline(g.entity)
+        if len(parts) <= 1:
+            return []
+        try:
+            idx = self.drawn_geometries.index(g)
+        except ValueError:
+            return []
+        color = g.color
+        for did in self.dim_ids_for_geometry(geometry_id):
+            self.dim_states.pop(did, None)
+        self.drawn_geometries.pop(idx)
+        created: list[DrawnGeometry] = []
+        base = len(self.drawn_geometries)
+        for i, ent in enumerate(parts):
+            ng = DrawnGeometry(
+                entity=ent,
+                name=entity_display_name(ent, base + i + 1),
+                color=color,
+            )
+            self.drawn_geometries.insert(idx + i, ng)
+            created.append(ng)
+        if created:
+            self.select(SelectionKind.DRAWN_GEOMETRY, created[0].id, notify=False)
+        self.notify()
+        return created
+
+    def dim_ids_for_geometry(self, geometry_id: str) -> list[str]:
+        g = self.get_drawn_geometry(geometry_id)
+        if g is None:
+            return []
+        ent = g.entity
+        if ent.get("type") == "line":
+            return [f"{geometry_id}_gx1", f"{geometry_id}_gy1", f"{geometry_id}_gx2",
+                    f"{geometry_id}_gy2", f"{geometry_id}_glen"]
+        if ent.get("type") == "arc":
+            return [f"{geometry_id}_asx", f"{geometry_id}_asy", f"{geometry_id}_aex",
+                    f"{geometry_id}_aey", f"{geometry_id}_amx", f"{geometry_id}_amy",
+                    f"{geometry_id}_ar"]
+        return []
+
+    def set_geometry_attr(self, geometry_id: str, attr: str, value: float) -> None:
+        from app.geometry.geometry_edit import (
+            arc_points, set_arc_end_point, set_arc_mid_point, set_arc_radius,
+            set_arc_start_point, set_line_end, set_line_length, set_line_start,
+        )
+        g = self.get_drawn_geometry(geometry_id)
+        if g is None:
+            return
+        ent = g.entity
+        t = ent.get("type")
+        if t == "line":
+            if attr == "x1":
+                set_line_start(ent, value, ent["y1"])
+            elif attr == "y1":
+                set_line_start(ent, ent["x1"], value)
+            elif attr == "x2":
+                set_line_end(ent, value, ent["y2"])
+            elif attr == "y2":
+                set_line_end(ent, ent["x2"], value)
+            elif attr == "length":
+                set_line_length(ent, value)
+        elif t == "arc":
+            start, end, mid = arc_points(ent)
+            if attr == "start_x":
+                set_arc_start_point(ent, value, start[1])
+            elif attr == "start_y":
+                set_arc_start_point(ent, start[0], value)
+            elif attr == "end_x":
+                set_arc_end_point(ent, value, end[1])
+            elif attr == "end_y":
+                set_arc_end_point(ent, end[0], value)
+            elif attr == "mid_x":
+                set_arc_mid_point(ent, value, mid[1])
+            elif attr == "mid_y":
+                set_arc_mid_point(ent, mid[0], value)
+            elif attr == "radius":
+                set_arc_radius(ent, value)
 
     def snap_line_targets(self, exclude_region_id: str = "") -> list:
         from app.geometry.line_math import collect_line_segments, infinite_line_segments, LineSeg

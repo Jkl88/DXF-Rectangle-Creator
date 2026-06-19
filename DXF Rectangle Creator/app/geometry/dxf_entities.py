@@ -229,6 +229,89 @@ def translate_entities(entities: list[dict], dx: float, dy: float) -> list[dict]
     return shifted
 
 
+_ENTITY_LABELS = {
+    "line": "Линия",
+    "arc": "Дуга",
+    "circle": "Окружность",
+    "polyline": "Полилиния",
+}
+
+
+def entity_type_label(entity: dict) -> str:
+    return _ENTITY_LABELS.get(entity.get("type", ""), "Элемент")
+
+
+def entity_display_name(entity: dict, index: int) -> str:
+    return f"{entity_type_label(entity)} {index}"
+
+
+def entity_center(entity: dict) -> tuple[float, float]:
+    xmin, ymin, w, h = entities_bbox([entity])
+    return xmin + w / 2, ymin + h / 2
+
+
+def _qt_angle_deg(cx: float, cy: float, x: float, y: float) -> float:
+    return math.degrees(math.atan2(-(y - cy), x - cx)) % 360.0
+
+
+def _bulge_segment_to_arc(x1: float, y1: float, x2: float, y2: float, bulge: float) -> dict:
+    dx, dy = x2 - x1, y2 - y1
+    chord = math.hypot(dx, dy)
+    sagitta = abs(bulge) * chord / 2
+    radius = (chord ** 2 / 4 + sagitta ** 2) / (2 * sagitta)
+    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+    nx, ny = -dy / chord, dx / chord
+    center_dist = math.sqrt(max(radius ** 2 - (chord / 2) ** 2, 0))
+    sign = 1 if bulge > 0 else -1
+    cx, cy = mx + nx * center_dist * sign, my + ny * center_dist * sign
+    start = _qt_angle_deg(cx, cy, x1, y1)
+    end = _qt_angle_deg(cx, cy, x2, y2)
+    if bulge > 0:
+        if end <= start:
+            end += 360.0
+    elif end >= start:
+        end -= 360.0
+    return {
+        "type": "arc",
+        "cx": cx,
+        "cy": cy,
+        "r": radius,
+        "start": start,
+        "end": end,
+    }
+
+
+def explode_polyline(entity: dict) -> list[dict]:
+    """Split polyline into separate line and arc entities."""
+    pts = entity.get("points") or []
+    if len(pts) < 2:
+        return []
+    bulges = entity.get("bulges") or [0.0] * len(pts)
+    closed = bool(entity.get("closed"))
+    seg_count = len(pts) if closed else len(pts) - 1
+    pieces: list[dict] = []
+    for i in range(seg_count):
+        j = (i + 1) % len(pts)
+        x1, y1 = pts[i]
+        x2, y2 = pts[j]
+        bulge = bulges[i] if i < len(bulges) else 0.0
+        if math.hypot(x2 - x1, y2 - y1) < 1e-9:
+            continue
+        if abs(bulge) < 1e-9:
+            pieces.append({"type": "line", "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        else:
+            pieces.append(_bulge_segment_to_arc(x1, y1, x2, y2, bulge))
+    return pieces
+
+
+def explode_entity_into_pieces(entity: dict) -> list[dict]:
+    """Break compound entity into primitive lines, arcs, circles."""
+    t = entity.get("type")
+    if t == "polyline":
+        return explode_polyline(entity)
+    return [entity]
+
+
 def normalize_imported_entities(entities: list[dict]) -> list[dict]:
     """Move geometry to local coords so it fits the editor (ignore DXF world offset)."""
     xmin, ymin, _, _ = entities_bbox(entities)
@@ -265,6 +348,74 @@ def _bulge_arc_points(
         a = a1 + (a2 - a1) * t
         pts.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
     return pts
+
+
+def entity_path_for_hit(ent: dict):
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QPainterPath
+
+    path = QPainterPath()
+    t = ent["type"]
+    if t == "line":
+        path.moveTo(ent["x1"], ent["y1"])
+        path.lineTo(ent["x2"], ent["y2"])
+        return path
+    if t == "circle":
+        r = ent["r"]
+        path.addEllipse(ent["cx"] - r, ent["cy"] - r, 2 * r, 2 * r)
+        return path
+    if t == "arc":
+        r = ent["r"]
+        rect = QRectF(ent["cx"] - r, ent["cy"] - r, 2 * r, 2 * r)
+        span = ent["end"] - ent["start"]
+        while span <= -360:
+            span += 360
+        while span > 360:
+            span -= 360
+        path.arcMoveTo(rect, ent["start"])
+        path.arcTo(rect, ent["start"], span)
+        return path
+    if t == "polyline":
+        pts = ent["points"]
+        bulges = ent.get("bulges") or []
+        if not pts:
+            return path
+        path.moveTo(pts[0][0], pts[0][1])
+        count = len(pts) if not ent.get("closed") else len(pts)
+        for i in range(count - 1):
+            x1, y1 = pts[i]
+            x2, y2 = pts[i + 1]
+            bulge = bulges[i] if i < len(bulges) else 0.0
+            if abs(bulge) < 1e-9:
+                path.lineTo(x2, y2)
+            else:
+                for px, py in _bulge_arc_points(x1, y1, x2, y2, bulge)[1:]:
+                    path.lineTo(px, py)
+        if ent.get("closed") and len(pts) > 2:
+            x1, y1 = pts[-1]
+            x2, y2 = pts[0]
+            bulge = bulges[-1] if bulges else 0.0
+            if abs(bulge) < 1e-9:
+                path.lineTo(x2, y2)
+            else:
+                for px, py in _bulge_arc_points(x1, y1, x2, y2, bulge)[1:]:
+                    path.lineTo(px, py)
+            path.closeSubpath()
+        return path
+    return path
+
+
+def hit_test_entity(ent: dict, x: float, y: float, tolerance: float) -> bool:
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtGui import QPainterPathStroker
+
+    path = entity_path_for_hit(ent)
+    if path.isEmpty():
+        return False
+    stroker = QPainterPathStroker()
+    stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+    stroker.setWidth(max(tolerance * 2, 2.0))
+    return stroker.createStroke(path).contains(QPointF(x, y))
 
 
 def entity_snap_points(entities: list[dict]) -> list[tuple[float, float]]:

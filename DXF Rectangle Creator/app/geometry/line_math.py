@@ -167,6 +167,19 @@ def collect_line_segments(document) -> list[LineSeg]:
         add(right, bottom, left, bottom, "drawn_rect", r.id)
         add(left, bottom, left, top, "drawn_rect", r.id)
 
+    for g in doc.drawn_geometries:
+        ent = g.entity
+        t = ent.get("type")
+        if t == "line":
+            add(ent["x1"], ent["y1"], ent["x2"], ent["y2"], "drawn_geometry", g.id)
+        elif t == "polyline":
+            pts = ent["points"]
+            n = len(pts) if not ent.get("closed") else len(pts)
+            for i in range(n - 1):
+                add(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], "drawn_geometry", g.id)
+            if ent.get("closed") and len(pts) > 2:
+                add(pts[-1][0], pts[-1][1], pts[0][0], pts[0][1], "drawn_geometry", g.id)
+
     return segs
 
 

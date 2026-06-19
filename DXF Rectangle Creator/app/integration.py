@@ -121,11 +121,14 @@ def try_forward_import_to_running_instance(paths: list[str], socket_name: str = 
     core = QCoreApplication.instance() or QCoreApplication([])
     sock = QLocalSocket(core)
     sock.connectToServer(socket_name)
-    if not sock.waitForConnected(400):
+    if not sock.waitForConnected(3000):
         return False
     for path in paths:
         sock.write(_encode_ipc_message(path))
-    sock.waitForBytesWritten(1000)
+        if not sock.waitForBytesWritten(3000):
+            sock.disconnectFromServer()
+            return False
+    sock.flush()
     sock.disconnectFromServer()
     return True
 

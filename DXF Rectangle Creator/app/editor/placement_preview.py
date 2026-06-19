@@ -164,3 +164,11 @@ class ToolPlacementPreview:
         self._add_shape(rect)
         self._horizontal_dim(left, right, bottom, format_dim(w), color)
         self._vertical_dim(top, bottom, right, format_dim(h), color)
+
+    def show_line(self, x1: float, y1: float, x2: float, y2: float, color: str = "#495057") -> None:
+        self.clear()
+        self._line(x1, y1, x2, y2, color)
+        dist = math.hypot(x2 - x1, y2 - y1)
+        if dist >= 1.0:
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            self._label(mx + 4, my + 4, format_dim(dist), color)

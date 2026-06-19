@@ -123,6 +123,7 @@ def export_dxf(document: Document, file_path: str) -> None:
     msp = doc.modelspace()
 
     dxf_contour = document.contour_kind == ContourKind.DXF
+    y_negate = dxf_contour
     if dxf_contour:
         _, _, _, height = document.contour_bounds()
         export_entities_to_msp(
@@ -133,11 +134,11 @@ def export_dxf(document: Document, file_path: str) -> None:
         d = document.circle.diameter
         msp.add_circle((d / 2, d / 2), d / 2)
         height = d
-    else:
+    elif document.contour_kind == ContourKind.RECT:
         _add_rect_contour(msp, document.rect)
         height = document.rect.height
-
-    y_negate = dxf_contour
+    else:
+        _, _, _, height = document.contour_bounds()
     for rh in document.resolve_holes():
         _add_hole(msp, rh, height=height, y_negate=y_negate)
 
@@ -149,5 +150,10 @@ def export_dxf(document: Document, file_path: str) -> None:
 
     for rect in document.drawn_rects:
         _add_drawn_rectangle(msp, rect, height=height, y_negate=y_negate)
+
+    for geom in document.drawn_geometries:
+        export_entities_to_msp(
+            msp, [geom.entity], height=height, y_negate=y_negate,
+        )
 
     doc.saveas(file_path)

@@ -13,6 +13,7 @@ class EditorView(QGraphicsView):
     def __init__(self, scene, on_user_view=None, on_clear_selection=None, on_nudge=None,
                  on_space=None, on_measure_mode_changed=None, on_shutter_mode_changed=None,
                  on_aux_line_mode_changed=None, on_rectangle_mode_changed=None,
+                 on_line_mode_changed=None,
                  on_origin_placement_done=None, on_hole_place_done=None,
                  on_array_place_done=None, on_dxf_drop=None, parent=None):
         super().__init__(scene, parent)
@@ -24,6 +25,7 @@ class EditorView(QGraphicsView):
         self._on_shutter_mode_changed = on_shutter_mode_changed
         self._on_aux_line_mode_changed = on_aux_line_mode_changed
         self._on_rectangle_mode_changed = on_rectangle_mode_changed
+        self._on_line_mode_changed = on_line_mode_changed
         self._on_origin_placement_done = on_origin_placement_done
         self._on_hole_place_done = on_hole_place_done
         self._on_array_place_done = on_array_place_done
@@ -35,6 +37,7 @@ class EditorView(QGraphicsView):
         self._left_press_pos = None
         self._shutter_drawing = False
         self._rectangle_drawing = False
+        self._line_drawing = False
         self._tool_digit_buffer = ""
         self._tool_digit_timer = QTimer(self)
         self._tool_digit_timer.setSingleShot(True)
@@ -140,7 +143,7 @@ class EditorView(QGraphicsView):
     def _tool_mode_active(self, ctrl) -> bool:
         return bool(ctrl and (
             ctrl.measure_mode or ctrl.shutter_mode or ctrl.aux_line_mode
-            or ctrl.rectangle_mode or ctrl.origin_placement_mode
+            or ctrl.rectangle_mode or ctrl.line_mode or ctrl.origin_placement_mode
             or ctrl.hole_place_mode or ctrl.array_place_mode
         ))
 
@@ -192,6 +195,15 @@ class EditorView(QGraphicsView):
             x, y = self._map_to_scene(event.position())
             ctrl.rectangle_press(x, y)
             self._rectangle_drawing = True
+            event.accept()
+            return
+        if (
+            ctrl is not None and ctrl.line_mode
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            x, y = self._map_to_scene(event.position())
+            ctrl.line_press(x, y)
+            self._line_drawing = True
             event.accept()
             return
         if (
@@ -272,6 +284,11 @@ class EditorView(QGraphicsView):
             ctrl.rectangle_move(x, y)
             event.accept()
             return
+        if ctrl is not None and ctrl.line_mode and self._line_drawing:
+            x, y = self._map_to_scene(event.position())
+            ctrl.line_move(x, y)
+            event.accept()
+            return
         if ctrl is not None and ctrl.shutter_mode and self._shutter_drawing:
             x, y = self._map_to_scene(event.position())
             ctrl.shutter_move(x, y)
@@ -305,6 +322,18 @@ class EditorView(QGraphicsView):
             self._rectangle_drawing = False
             if done and self._on_rectangle_mode_changed:
                 self._on_rectangle_mode_changed(False)
+            event.accept()
+            return
+        if (
+            self._line_drawing
+            and event.button() == Qt.MouseButton.LeftButton
+            and ctrl is not None and ctrl.line_mode
+        ):
+            x, y = self._map_to_scene(event.position())
+            done = ctrl.line_release(x, y)
+            self._line_drawing = False
+            if done and self._on_line_mode_changed:
+                self._on_line_mode_changed(False)
             event.accept()
             return
         if (
@@ -366,6 +395,13 @@ class EditorView(QGraphicsView):
                 self._rectangle_drawing = False
                 if self._on_rectangle_mode_changed:
                     self._on_rectangle_mode_changed(False)
+                event.accept()
+                return
+            if self._scene_ctrl.line_mode:
+                self._scene_ctrl.cancel_line()
+                self._line_drawing = False
+                if self._on_line_mode_changed:
+                    self._on_line_mode_changed(False)
                 event.accept()
                 return
             if self._scene_ctrl.shutter_mode:

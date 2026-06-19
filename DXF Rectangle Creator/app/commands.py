@@ -3,7 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QUndoCommand
 
-from app.models.base import ContourKind, Hole, HoleArray, SelectionKind, ShutterRegion, ShutterLayoutParams, InfiniteLine, DrawnRectangle
+from app.models.base import ContourKind, Hole, HoleArray, SelectionKind, ShutterRegion, ShutterLayoutParams, InfiniteLine, DrawnRectangle, DrawnGeometry
 from app.models.document import Document
 
 
@@ -38,6 +38,7 @@ class DocumentCommand(QUndoCommand):
             "shutter_layout": self.document.shutter_layout,
             "infinite_lines": self.document.infinite_lines,
             "drawn_rects": self.document.drawn_rects,
+            "drawn_geometries": self.document.drawn_geometries,
         })
 
     def _restore(self, snap):
@@ -62,6 +63,7 @@ class DocumentCommand(QUndoCommand):
         self.document.shutter_layout = snap.get("shutter_layout", ShutterLayoutParams.defaults())
         self.document.infinite_lines = snap.get("infinite_lines", [])
         self.document.drawn_rects = snap.get("drawn_rects", [])
+        self.document.drawn_geometries = snap.get("drawn_geometries", [])
         self.document.notify()
 
     def redo(self):
@@ -182,6 +184,47 @@ class AddDrawnRectCommand(DocumentCommand):
             self.document.drawn_rects.append(self.rect)
         self.document.select(SelectionKind.DRAWN_RECT, self.rect.id)
         self.document.notify()
+
+    def undo(self):
+        self._restore(self._before)
+
+
+class AddDrawnGeometryCommand(DocumentCommand):
+    def __init__(self, document: Document, geometry: DrawnGeometry):
+        super().__init__(document, "Геометрия")
+        self.geometry = geometry
+        self._before = self._snapshot()
+
+    def redo(self):
+        if self.geometry not in self.document.drawn_geometries:
+            self.document.drawn_geometries.append(self.geometry)
+        self.document.select(SelectionKind.DRAWN_GEOMETRY, self.geometry.id)
+        self.document.notify()
+
+    def undo(self):
+        self._restore(self._before)
+
+
+class ExplodeDxfContourCommand(DocumentCommand):
+    def __init__(self, document: Document):
+        super().__init__(document, "Разрушить контур")
+        self._before = self._snapshot()
+
+    def redo(self):
+        self.document.explode_dxf_contour()
+
+    def undo(self):
+        self._restore(self._before)
+
+
+class ExplodeDrawnGeometryCommand(DocumentCommand):
+    def __init__(self, document: Document, geometry_id: str):
+        super().__init__(document, "Разобрать полилинию")
+        self.geometry_id = geometry_id
+        self._before = self._snapshot()
+
+    def redo(self):
+        self.document.explode_drawn_geometry(self.geometry_id)
 
     def undo(self):
         self._restore(self._before)
