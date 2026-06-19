@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
             on_origin_placement_done=self._on_origin_placed,
             on_hole_place_done=self._end_hole_place_mode,
             on_array_place_done=self._end_array_place_mode,
+            on_dxf_drop=self.import_dxf_from_path,
         )
         self.scene_ctrl = EditorSceneController(
             self.document, self.scene,
@@ -787,13 +788,7 @@ class MainWindow(QMainWindow):
             return f"{designation} _ {name}"
         return name
 
-    def _import_dxf(self):
-        last = self.settings.value("lastSavePath", os.path.expanduser("~"))
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Импорт DXF", last, "DXF (*.dxf);;Все файлы (*.*)",
-        )
-        if not path:
-            return
+    def import_dxf_from_path(self, path: str) -> None:
         try:
             def apply():
                 apply_dxf_contour(self.document, path)
@@ -814,6 +809,15 @@ class MainWindow(QMainWindow):
             self._begin_origin_placement()
         except Exception as e:
             QMessageBox.critical(self, "Импорт DXF", str(e))
+
+    def _import_dxf(self):
+        last = self.settings.value("lastSavePath", os.path.expanduser("~"))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Импорт DXF", last, "DXF (*.dxf);;Все файлы (*.*)",
+        )
+        if not path:
+            return
+        self.import_dxf_from_path(path)
 
     def _export_dxf(self):
         default = f"{self._export_basename()}.dxf"
@@ -843,11 +847,58 @@ class MainWindow(QMainWindow):
 
 def main():
     import sys
+
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtNetwork import QLocalServer
     from PyQt6.QtWidgets import QApplication
+
+    from app.integration import (
+        IPC_SOCKET_NAME,
+        decode_ipc_messages,
+        parse_import_paths,
+        register_installation,
+        try_forward_import_to_running_instance,
+    )
     from app.theme import apply_theme
+    from app.version import CURRENT_VERSION
+
+    pending_imports = parse_import_paths(sys.argv[1:])
+    if pending_imports and try_forward_import_to_running_instance(pending_imports):
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     apply_theme(app)
+    register_installation(CURRENT_VERSION)
+
     window = MainWindow()
     window.resize(1200, 800)
+
+    ipc_server = QLocalServer(app)
+    QLocalServer.removeServer(IPC_SOCKET_NAME)
+    if not ipc_server.listen(IPC_SOCKET_NAME):
+        ipc_server = None
+
+    def _activate_window() -> None:
+        window.showNormal()
+        window.raise_()
+        window.activateWindow()
+
+    def _handle_ipc_socket(sock) -> None:
+        data = bytes(sock.readAll())
+        sock.deleteLater()
+        for path in decode_ipc_messages(data):
+            QTimer.singleShot(0, lambda p=path: window.import_dxf_from_path(p))
+        QTimer.singleShot(0, _activate_window)
+
+    if ipc_server is not None:
+        def _on_ipc_connection() -> None:
+            while ipc_server.hasPendingConnections():
+                _handle_ipc_socket(ipc_server.nextPendingConnection())
+
+        ipc_server.newConnection.connect(_on_ipc_connection)
+
+    for path in pending_imports:
+        QTimer.singleShot(0, lambda p=path: window.import_dxf_from_path(p))
+
     window.show()
     sys.exit(app.exec())

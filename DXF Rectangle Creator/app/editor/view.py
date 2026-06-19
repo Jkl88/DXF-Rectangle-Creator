@@ -14,7 +14,7 @@ class EditorView(QGraphicsView):
                  on_space=None, on_measure_mode_changed=None, on_shutter_mode_changed=None,
                  on_aux_line_mode_changed=None, on_rectangle_mode_changed=None,
                  on_origin_placement_done=None, on_hole_place_done=None,
-                 on_array_place_done=None, parent=None):
+                 on_array_place_done=None, on_dxf_drop=None, parent=None):
         super().__init__(scene, parent)
         self._on_user_view = on_user_view
         self._on_clear_selection = on_clear_selection
@@ -27,6 +27,7 @@ class EditorView(QGraphicsView):
         self._on_origin_placement_done = on_origin_placement_done
         self._on_hole_place_done = on_hole_place_done
         self._on_array_place_done = on_array_place_done
+        self._on_dxf_drop = on_dxf_drop
         self._scene_ctrl = None
         self._panning = False
         self._rmb_pan = False
@@ -46,6 +47,39 @@ class EditorView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
+
+    @staticmethod
+    def _dxf_path_from_mime(mime) -> str | None:
+        if not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = url.toLocalFile()
+            if path.lower().endswith(".dxf"):
+                return path
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dxf_path_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if self._dxf_path_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        path = self._dxf_path_from_mime(event.mimeData())
+        if path and self._on_dxf_drop:
+            self._on_dxf_drop(path)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
     def set_scene_controller(self, ctrl) -> None:
         self._scene_ctrl = ctrl
