@@ -23,7 +23,17 @@ def _circle_dict(entity) -> dict:
     return {"type": "circle", "cx": cx, "cy": cy, "r": float(entity.dxf.radius)}
 
 
-def _arc_pick_dict(entity) -> dict:
+def _line_dict(entity) -> dict:
+    s = entity.dxf.start
+    e = entity.dxf.end
+    return {
+        "type": "line",
+        "x1": float(s.x), "y1": float(-s.y),
+        "x2": float(e.x), "y2": float(-e.y),
+    }
+
+
+def _arc_dict(entity) -> dict:
     cx, cy = _wcs_center_xy(entity)
     return {
         "type": "arc",
@@ -32,8 +42,50 @@ def _arc_pick_dict(entity) -> dict:
         "r": float(entity.dxf.radius),
         "start": float(entity.dxf.start_angle),
         "end": float(entity.dxf.end_angle),
-        "pick_only": True,
     }
+
+
+def _arc_pick_dict(entity) -> dict:
+    return {**_arc_dict(entity), "pick_only": True}
+
+
+def _polyline_dict_from_points(
+    points: list[tuple[float, float]], bulges: list[float], closed: bool,
+) -> dict | None:
+    if len(points) < 2:
+        return None
+    return {
+        "type": "polyline",
+        "points": points,
+        "closed": closed,
+        "bulges": bulges,
+    }
+
+
+def _lwpolyline_dict(entity) -> dict | None:
+    try:
+        points: list[tuple[float, float]] = []
+        bulges: list[float] = []
+        for x, y, bulge in entity.get_points(format="xyb"):
+            points.append((float(x), float(-y)))
+            bulges.append(float(bulge))
+        return _polyline_dict_from_points(points, bulges, bool(entity.closed))
+    except Exception:
+        return None
+
+
+def _polyline_dict(entity) -> dict | None:
+    try:
+        points: list[tuple[float, float]] = []
+        bulges: list[float] = []
+        for vertex in entity.vertices:
+            loc = vertex.dxf.location
+            points.append((float(loc.x), float(-loc.y)))
+            bulges.append(float(getattr(vertex.dxf, "bulge", 0.0) or 0.0))
+        closed = bool(entity.is_closed)
+        return _polyline_dict_from_points(points, bulges, closed)
+    except Exception:
+        return None
 
 
 def _paths_to_polylines(entity) -> list[dict]:
@@ -76,16 +128,28 @@ def _import_entity(entity) -> list[dict]:
             return [_circle_dict(entity)]
         except Exception:
             return []
-    if t in _PATH_TYPES:
-        flat = _paths_to_polylines(entity)
-        if not flat:
+    if t == "LINE":
+        try:
+            return [_line_dict(entity)]
+        except Exception:
             return []
-        if t == "ARC":
-            try:
-                return flat + [_arc_pick_dict(entity)]
-            except Exception:
-                pass
-        return flat
+    if t == "ARC":
+        try:
+            return [_arc_dict(entity)]
+        except Exception:
+            return _paths_to_polylines(entity)
+    if t == "LWPOLYLINE":
+        pl = _lwpolyline_dict(entity)
+        if pl is not None:
+            return [pl]
+        return _paths_to_polylines(entity)
+    if t == "POLYLINE":
+        pl = _polyline_dict(entity)
+        if pl is not None:
+            return [pl]
+        return _paths_to_polylines(entity)
+    if t in _PATH_TYPES:
+        return _paths_to_polylines(entity)
     return []
 
 
@@ -302,6 +366,26 @@ def paint_entities(painter, entities, pen) -> None:
             painter.drawPath(path)
 
 
+def _msp_add_polyline(msp, ent: dict, xy, *, flip_bulge: bool = False) -> None:
+    pts = ent["points"]
+    bulges = ent.get("bulges") or [0.0] * len(pts)
+    has_bulge = len(bulges) == len(pts) and any(abs(b) > 1e-9 for b in bulges)
+    if has_bulge:
+        formatted = []
+        for i, (x, y) in enumerate(pts):
+            b = bulges[i] if i < len(bulges) else 0.0
+            if flip_bulge:
+                b = -b
+            wx, wy = xy(x, y)
+            formatted.append((wx, wy, 0, 0, b))
+        msp.add_lwpolyline(formatted, format="xyseb", close=bool(ent.get("closed")))
+        return
+    world = [xy(x, y) for x, y in pts]
+    if ent.get("closed") and world and world[0] != world[-1]:
+        world.append(world[0])
+    msp.add_lwpolyline(world, close=bool(ent.get("closed")))
+
+
 def add_entities_to_msp(msp, entities: list[dict]) -> None:
     for ent in entities:
         if ent.get("pick_only"):
@@ -319,10 +403,7 @@ def add_entities_to_msp(msp, entities: list[dict]) -> None:
                 end_angle=ent["end"],
             )
         elif t == "polyline":
-            pts = [(x, y) for x, y in ent["points"]]
-            if ent.get("closed") and pts and pts[0] != pts[-1]:
-                pts.append(pts[0])
-            msp.add_lwpolyline(pts, close=bool(ent.get("closed")))
+            _msp_add_polyline(msp, ent, lambda x, y: (x, y))
 
 
 def _editor_to_dxf_xy(
@@ -356,7 +437,4 @@ def export_entities_to_msp(
                 end_angle=ent["end"],
             )
         elif t == "polyline":
-            pts = [xy(x, y) for x, y in ent["points"]]
-            if ent.get("closed") and pts and pts[0] != pts[-1]:
-                pts.append(pts[0])
-            msp.add_lwpolyline(pts, close=bool(ent.get("closed")))
+            _msp_add_polyline(msp, ent, xy, flip_bulge=y_negate)

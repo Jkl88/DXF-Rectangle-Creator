@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -101,8 +102,11 @@ class Document:
         if self.contour_kind == ContourKind.CIRCLE:
             self.name = f"C_{self.circle.diameter:.1f}"
         elif self.contour_kind == ContourKind.DXF:
-            _, _, w, h = self.contour_bounds()
-            self.name = f"DXF_{w:.1f}x{h:.1f}"
+            if self.dxf_contour.source_file:
+                self.name = os.path.splitext(self.dxf_contour.source_file)[0]
+            else:
+                _, _, w, h = self.contour_bounds()
+                self.name = f"DXF_{w:.1f}x{h:.1f}"
         else:
             self.name = f"R_{self.rect.width:.1f}x{self.rect.height:.1f}"
 

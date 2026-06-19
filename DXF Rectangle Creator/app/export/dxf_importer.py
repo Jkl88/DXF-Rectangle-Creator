@@ -17,6 +17,7 @@ def apply_dxf_contour(document: Document, file_path: str) -> None:
         raise ValueError("В файле не найдено подходящей геометрии")
 
     document.contour_kind = ContourKind.DXF
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
     document.dxf_contour = DxfContour(
         entities=entities,
         origin_x=0.0,
@@ -24,4 +25,5 @@ def apply_dxf_contour(document: Document, file_path: str) -> None:
         origin_set=False,
         source_file=os.path.basename(file_path),
     )
+    document.name = base_name
     document.rect.corner_size = 0.0
