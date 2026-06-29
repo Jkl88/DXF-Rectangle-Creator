@@ -4,7 +4,7 @@ import os
 import re
 import sys
 
-from PyQt6.QtCore import QEvent, QSettings, QUrl, Qt
+from PyQt6.QtCore import QEvent, QSettings, QTimer, QUrl, Qt
 from PyQt6.QtGui import QAction, QDesktopServices, QKeyEvent, QKeySequence, QUndoStack
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QDoubleSpinBox, QFileDialog, QHBoxLayout, QLabel,
@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
 
         self._rebuild_scene()
         self.title_block.refresh()
-        check_update(self)
+        QTimer.singleShot(2500, lambda: check_update(self))
 
     def _load_title_block_settings(self) -> None:
         tb = self.document.title_block
@@ -928,6 +928,7 @@ def main():
         register_installation,
         try_forward_import_to_running_instance,
     )
+    from app.splash import finish_splash_animated, show_splash
     from app.theme import apply_theme
     from app.version import CURRENT_VERSION
 
@@ -937,7 +938,11 @@ def main():
 
     app = QApplication(sys.argv)
     apply_theme(app)
-    register_installation(CURRENT_VERSION)
+
+    splash = show_splash(app) if getattr(sys, "frozen", False) else None
+    app.processEvents()
+
+    QTimer.singleShot(0, lambda: register_installation(CURRENT_VERSION))
 
     window = MainWindow()
     window.resize(1200, 800)
@@ -991,4 +996,6 @@ def main():
         QTimer.singleShot(0, lambda p=path: window.import_dxf_from_path(p))
 
     window.show()
+    if splash is not None:
+        finish_splash_animated(splash, window)
     sys.exit(app.exec())

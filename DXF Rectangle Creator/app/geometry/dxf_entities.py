@@ -312,10 +312,107 @@ def explode_entity_into_pieces(entity: dict) -> list[dict]:
     return [entity]
 
 
+DEDUP_TOLERANCE = 0.01
+
+
+def _near(a: float, b: float, tol: float = DEDUP_TOLERANCE) -> bool:
+    return abs(a - b) <= tol
+
+
+def _near_pt(
+    p1: tuple[float, float], p2: tuple[float, float], tol: float = DEDUP_TOLERANCE,
+) -> bool:
+    return math.hypot(p1[0] - p2[0], p1[1] - p2[1]) <= tol
+
+
+def _line_endpoints(line: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+    return (line["x1"], line["y1"]), (line["x2"], line["y2"])
+
+
+def _arc_endpoint(arc: dict, angle_deg: float) -> tuple[float, float]:
+    rad = math.radians(angle_deg)
+    return (
+        arc["cx"] + arc["r"] * math.cos(rad),
+        arc["cy"] - arc["r"] * math.sin(rad),
+    )
+
+
+def entities_equal(a: dict, b: dict, tol: float = DEDUP_TOLERANCE) -> bool:
+    """True when two primitive entities occupy the same geometry."""
+    if a.get("pick_only") != b.get("pick_only"):
+        return False
+    ta, tb = a.get("type"), b.get("type")
+    if ta != tb:
+        return False
+    if ta == "line":
+        a1, a2 = _line_endpoints(a)
+        b1, b2 = _line_endpoints(b)
+        return (_near_pt(a1, b1, tol) and _near_pt(a2, b2, tol)) or (
+            _near_pt(a1, b2, tol) and _near_pt(a2, b1, tol)
+        )
+    if ta == "circle":
+        return (
+            _near(a["cx"], b["cx"], tol)
+            and _near(a["cy"], b["cy"], tol)
+            and _near(a["r"], b["r"], tol)
+        )
+    if ta == "arc":
+        if not (
+            _near(a["cx"], b["cx"], tol)
+            and _near(a["cy"], b["cy"], tol)
+            and _near(a["r"], b["r"], tol)
+        ):
+            return False
+        a_s, a_e = _arc_endpoint(a, a["start"]), _arc_endpoint(a, a["end"])
+        b_s, b_e = _arc_endpoint(b, b["start"]), _arc_endpoint(b, b["end"])
+        return (_near_pt(a_s, b_s, tol) and _near_pt(a_e, b_e, tol)) or (
+            _near_pt(a_s, b_e, tol) and _near_pt(a_e, b_s, tol)
+        )
+    if ta == "polyline":
+        if bool(a.get("closed")) != bool(b.get("closed")):
+            return False
+        pts_a = list(a.get("points") or [])
+        pts_b = list(b.get("points") or [])
+        if len(pts_a) != len(pts_b) or len(pts_a) < 2:
+            return False
+        bulges_a = list(a.get("bulges") or [0.0] * len(pts_a))
+        bulges_b = list(b.get("bulges") or [0.0] * len(pts_b))
+
+        def _poly_match(offset: int, reverse: bool) -> bool:
+            n = len(pts_a)
+            for i in range(n):
+                j = (n - 1 - i if reverse else i)
+                bj = (j + offset) % n
+                if not _near_pt(pts_a[i], pts_b[bj], tol):
+                    return False
+                ba = bulges_a[i] if i < len(bulges_a) else 0.0
+                bb = bulges_b[bj] if bj < len(bulges_b) else 0.0
+                if not _near(ba, bb, tol):
+                    return False
+            return True
+
+        for offset in range(len(pts_a)):
+            for reverse in (False, True):
+                if _poly_match(offset, reverse):
+                    return True
+        return False
+    return False
+
+
+def deduplicate_entities(entities: list[dict], tol: float = DEDUP_TOLERANCE) -> list[dict]:
+    """Drop exact duplicates (same geometry on top of each other)."""
+    unique: list[dict] = []
+    for ent in entities:
+        if not any(entities_equal(ent, kept, tol) for kept in unique):
+            unique.append(ent)
+    return unique
+
+
 def normalize_imported_entities(entities: list[dict]) -> list[dict]:
     """Move geometry to local coords so it fits the editor (ignore DXF world offset)."""
     xmin, ymin, _, _ = entities_bbox(entities)
-    return translate_entities(entities, -xmin, -ymin)
+    translated = translate_entities(entities, -xmin, -ymin)
+    return deduplicate_entities(translated)
 
 
 def _bulge_arc_points(

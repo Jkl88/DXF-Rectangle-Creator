@@ -1413,7 +1413,12 @@ class Document:
             return []
         import copy
         from app.geometry.dxf_entities import (
-            entities_bbox, entity_display_name, explode_entity_into_pieces, translate_entities,
+            deduplicate_entities,
+            entities_bbox,
+            entities_equal,
+            entity_display_name,
+            explode_entity_into_pieces,
+            translate_entities,
         )
         from app.models.base import DxfContour
 
@@ -1426,33 +1431,53 @@ class Document:
             entities = translate_entities([copy.deepcopy(e) for e in entities], -xmin, -ymin)
         else:
             entities = [copy.deepcopy(e) for e in entities]
+        pieces: list[dict] = []
+        for ent in entities:
+            pieces.extend(explode_entity_into_pieces(ent))
+        pieces = deduplicate_entities(pieces)
         created: list[DrawnGeometry] = []
         hole_idx = len(self.holes)
         geom_idx = len(self.drawn_geometries)
-        from app.geometry.dxf_entities import entity_display_name, explode_entity_into_pieces
-        for ent in entities:
-            for piece in explode_entity_into_pieces(ent):
-                if piece.get("type") == "circle":
-                    hole_idx += 1
-                    self.holes.append(Hole(
-                        cx=piece["cx"],
-                        cy=piece["cy"],
-                        diameter=max(piece["r"] * 2, 0.1),
-                        name=f"Отверстие {hole_idx}",
-                        color=HOLE_COLORS[(hole_idx - 1) % len(HOLE_COLORS)],
-                    ))
+        for piece in pieces:
+            if piece.get("type") == "circle":
+                diameter = max(piece["r"] * 2, 0.1)
+                circle_ent = {
+                    "type": "circle",
+                    "cx": piece["cx"],
+                    "cy": piece["cy"],
+                    "r": diameter / 2,
+                }
+                if any(
+                    entities_equal(circle_ent, {
+                        "type": "circle",
+                        "cx": h.cx,
+                        "cy": h.cy,
+                        "r": h.diameter / 2,
+                    })
+                    for h in self.holes
+                ):
                     continue
-                geom_idx += 1
-                g = DrawnGeometry(
-                    entity=piece,
-                    name=entity_display_name(piece, geom_idx),
-                    color=HOLE_COLORS[(geom_idx - 1) % len(HOLE_COLORS)],
-                )
-                self.drawn_geometries.append(g)
-                created.append(g)
+                hole_idx += 1
+                self.holes.append(Hole(
+                    cx=piece["cx"],
+                    cy=piece["cy"],
+                    diameter=diameter,
+                    name=f"Отверстие {hole_idx}",
+                    color=HOLE_COLORS[(hole_idx - 1) % len(HOLE_COLORS)],
+                ))
+                continue
+            if any(entities_equal(piece, dg.entity) for dg in self.drawn_geometries):
+                continue
+            geom_idx += 1
+            g = DrawnGeometry(
+                entity=piece,
+                name=entity_display_name(piece, geom_idx),
+                color=HOLE_COLORS[(geom_idx - 1) % len(HOLE_COLORS)],
+            )
+            self.drawn_geometries.append(g)
+            created.append(g)
         self.contour_kind = ContourKind.NONE
         self.dxf_contour = DxfContour()
-        self.update_auto_name()
         if created:
             self.select(SelectionKind.DRAWN_GEOMETRY, created[0].id, notify=False)
         elif self.holes:
@@ -1461,12 +1486,12 @@ class Document:
         return created
 
     def explode_drawn_geometry(self, geometry_id: str) -> list[DrawnGeometry]:
-        from app.geometry.dxf_entities import entity_display_name, explode_polyline
+        from app.geometry.dxf_entities import deduplicate_entities, entity_display_name, explode_polyline
 
         g = self.get_drawn_geometry(geometry_id)
         if g is None or g.entity.get("type") != "polyline":
             return []
-        parts = explode_polyline(g.entity)
+        parts = deduplicate_entities(explode_polyline(g.entity))
         if len(parts) <= 1:
             return []
         try:
